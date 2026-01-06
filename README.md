@@ -75,6 +75,8 @@ This prevents account blow-up and enforces discipline.
 **EURJPYm**
 **GBPJPYm**
 **NZDJPYm**
+**EURUSDm**
+**GBPUSDm**
 ---
 
 
