@@ -90,8 +90,7 @@ class MetaTraderConfig:
                 return False
 
             print(f"✅ MT5 initialized successfully")
-            print(f"   Account: {self.username}")
-            print(f"   Server: {self.server}")
+
             return True
 
         except KeyError as e:
@@ -122,7 +121,7 @@ class MetaTraderConfig:
                 print(f"❌ MT5 login failed: {error}")
                 return False
 
-            print(f"✅ Logged in to MT5 account {self.username}")
+            print(f"✅ Logged in to MT5 account")
             return True
 
         except Exception as e:

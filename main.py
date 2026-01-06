@@ -62,7 +62,7 @@ def main():
     # ============================================================
     strategy = RSIFlexibleStrategy(
         sl_pips=30,  # Stop loss in pips
-        allowed_weekdays=[1, 2, 3],  # Monday-Friday trading
+        allowed_weekdays=[1, 2, 3],  # Tuesday-Thursday trading
         initial_balance=100,
     )
 
@@ -71,10 +71,17 @@ def main():
     # ============================================================
     # 3. TRADING PARAMETERS
     # ============================================================
-    SYMBOLS = ["GBPJPYm", "NZDJPYm", "EURJPYm", "USDJPYm"]
+    SYMBOLS = [
+        "GBPJPYm",
+        "NZDJPYm",
+        "EURJPYm",
+        "EURUSDm",  # EUR/USD
+        "GBPUSDm",
+        "CADJPYm",
+    ]
     TIMEFRAME = mt5.TIMEFRAME_M15
     TIMEFRAME_MINUTES = 15
-    MAX_OPEN_TRADES = 3
+    MAX_OPEN_TRADES = 1
 
     last_run_minute = None
 
@@ -105,7 +112,7 @@ def main():
             data = mt5_config.get_market_data_date_range(
                 symbol=symbol,
                 timeframe=TIMEFRAME,
-                start_date=now - timedelta(days=30),
+                start_date=now - timedelta(days=6),
                 end_date=now,
             )
 
@@ -113,12 +120,13 @@ def main():
                 print("   ⚠️ No data available")
                 continue
 
-            signal = strategy.generate_signal(data)
+            signal = strategy.generate_signal(price_data=data, symbol=symbol)
 
             # ---------------- SAFE LOGGING ----------------
             print(f"   Trend: {signal.get('trend')}")
             print(f"   Reason: {signal.get('reason')}")
-            print(f"   Position Size: {signal.get('position_size')}")
+            print(f"   Position Size: {signal.get('lot_size')}")
+            print(f"   Slope: {signal.get('slope')}")
 
             if not signal["signal"]:
                 print("   ⏸️ No signal")
@@ -141,11 +149,11 @@ def main():
                 f"   Risk: {risk:.5f} | Reward: {reward:.5f} | RR: {reward / risk:.2f}"
             )
 
-            open_trades = mt5_config.get_open_trades_count()
+            open_trades = mt5_config.get_open_trades_count(symbol=symbol)
 
             if open_trades >= MAX_OPEN_TRADES:
                 print(
-                    f"   🚫 Trade skipped — open trades ({open_trades}/{MAX_OPEN_TRADES})"
+                    f"   🚫 Trade skipped — open trades ({open_trades}/{MAX_OPEN_TRADES} for {symbol})"
                 )
                 continue
 

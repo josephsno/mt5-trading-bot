@@ -2,7 +2,6 @@ import pandas as pd
 from typing import Dict, Any, Optional
 import MetaTrader5 as mt5
 import random, time
-from datetime import datetime
 
 
 class MACDTrendStrategy:
@@ -1751,7 +1750,6 @@ class RSIFlexibleStrategy:
     def __init__(
         self,
         sl_pips: float = 20.0,
-        tp_pips: Optional[float] = None,
         allowed_weekdays: Optional[list[int]] = None,
         allowed_hours: Optional[list[int]] = None,  # ✅ NEW
         starting_lot: float = 0.01,
@@ -1765,7 +1763,7 @@ class RSIFlexibleStrategy:
         initial_balance: float = 100.0,  # initial capital for risk management
     ):
         self.sl_pips = sl_pips
-        self.tp_pips = tp_pips or sl_pips  # 1:1 R/R
+        self.tp_pips = sl_pips  # 1:1 R/R
 
         self.allowed_weekdays = allowed_weekdays or list(range(7))
         self.allowed_hours = allowed_hours or list(range(24))  # ✅ default = all hours
@@ -1784,6 +1782,8 @@ class RSIFlexibleStrategy:
         # EMA Slope
         self.ema_trend = ema_trend
         self.ema_slope_lookback = ema_slope_lookback
+        self.min_ema_slope = 0.00005
+
 
         # Volume
         self.use_volume_filter = use_volume_filter
@@ -1825,11 +1825,11 @@ class RSIFlexibleStrategy:
         Stops trading if balance drops below 50% of starting balance
         """
         bal = self.get_balance()
-        if abs(bal - self.starting_balance) >= 0.6 * self.starting_balance:
+        if bal - self.starting_balance >= 0.6 * self.starting_balance:
             return True
         # if abs(bal - self.starting_balance) <= 0.6 * self.starting_balance:
         #     return True
-        
+
         else:
             return False
 
@@ -1852,14 +1852,35 @@ class RSIFlexibleStrategy:
         hour = pd.to_datetime(timestamp).hour
         return hour in self.allowed_hours
 
-    def _pip_value(self, price: float) -> float:
-        return 0.01 if price > 20 else 0.0001
+    def _pip_value(self, symbol: str) -> float:
+        """
+        Return pip value per symbol.
+        Assumes standard Forex conventions.
+        """
+        if symbol.endswith("JPY"):
+            return 0.01
+        return 0.0001
 
-    def _sl_tp(self, entry: float, side: str):
-        pv = self._pip_value(entry)
+    def _sl_tp(self, entry_price: float, side: str, symbol: str) -> tuple[float, float]:
+        """
+        Simple SL/TP calculation for 1:1 RR.
+        - entry_price: price to enter
+        - side: 'buy' or 'sell'
+        - symbol: used to determine pip value
+        """
+        # Determine pip value
+        pip_value = 0.01 if symbol.endswith("JPYm") else 0.0001
+        sl_distance = self.sl_pips * pip_value
+        tp_distance = sl_distance  # mirror for 1:1
+
         if side == "buy":
-            return entry - self.sl_pips * pv, entry + self.tp_pips * pv
-        return entry + self.sl_pips * pv, entry - self.tp_pips * pv
+            sl = entry_price - sl_distance
+            tp = entry_price + tp_distance
+        else:
+            sl = entry_price + sl_distance
+            tp = entry_price - tp_distance
+
+        return round(sl, 5), round(tp, 5)
 
     def _calculate_rsi(self, close: pd.Series):
         delta = close.diff()
@@ -1920,85 +1941,155 @@ class RSIFlexibleStrategy:
             self.winning_streak = 0
         self.last_trade_won = was_win
 
+
     # ---------------- MAIN LOGIC ---------------- #
-    def generate_signal(self, price_data: pd.DataFrame) -> Dict[str, Any]:
+    def generate_signal(self, price_data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+
+        # ---------- BASIC GUARDS ----------
         if price_data is None or price_data.empty:
-            return self._empty_signal("Price data empty")
+            return self._empty_signal("❌ Price data is empty or None")
 
         if self._check_balance_stop():
-            return self._empty_signal("max profit reached")
+            return self._empty_signal(
+                f"⛔ Balance stop hit | balance={self.get_balance():.2f}"
+            )
 
         min_bars = max(
             self.rsi_period,
             self.ema_trend,
             self.ema_slope_lookback,
-            self.volume_ma_period,
+            self.volume_ma_period + 2,
         )
-        if len(price_data) < min_bars:
-            return self._empty_signal("Not enough data")
 
+        if len(price_data) < min_bars:
+            return self._empty_signal(
+                f"❌ Not enough data | bars={len(price_data)} need≥{min_bars}"
+            )
+
+        # ---------- TIME FILTER ----------
         entry_time = self._get_entry_time(price_data)
+
         if not self._is_allowed_date(entry_time):
-            return self._empty_signal("Weekday not allowed")
+            return self._empty_signal(
+                f"📅 Day filtered out | weekday={pd.to_datetime(entry_time).weekday()}"
+            )
 
         if not self._is_allowed_hour(entry_time):
-            return self._empty_signal("Hour not allowed")
+            return self._empty_signal(
+                f"⏰ Hour filtered out | hour={pd.to_datetime(entry_time).hour}"
+            )
 
+        # ---------- PRICE SERIES ----------
         close = price_data["close"]
         open_ = price_data["open"]
 
-        # Flexible volume detection
+        # ---------- VOLUME SERIES ----------
         volume_col = next(
             (
-                c
-                for c in ["volume", "tick_volume", "vol", "real_volume"]
+                c for c in ["volume", "tick_volume", "vol", "real_volume"]
                 if c in price_data.columns
             ),
             None,
         )
         volume = price_data[volume_col] if volume_col else None
 
-        rsi = self._calculate_rsi(close)
+        # ---------- INDICATORS ----------
         ema = close.ewm(span=self.ema_trend).mean()
-        price = close.iloc[-1]
+        rsi = self._calculate_rsi(close)
 
-        # EMA slope trend (optional guidance, not strict)
+        last_close = close.iloc[-1]
+        last_open = open_.iloc[-1]
+        last_ema = ema.iloc[-1]
+
+        # ---------- TREND DIRECTION (PRICE vs EMA) ----------
+        trend = "buy" if last_close >= last_ema else "sell"
+
+        # ---------- EMA SLOPE (STEEPNESS) ----------
         ema_slope = ema.iloc[-1] - ema.iloc[-self.ema_slope_lookback]
-        trend = "buy" if ema_slope >= 0 else "sell"
+        min_slope = self.min_ema_slope  # symbol-tuned or ATR-based
 
-        # RSI confirmation
+        if trend == "buy" and ema_slope < min_slope:
+            return self._empty_signal(
+                f"❌ Weak BUY trend | EMA slope={ema_slope:.6f} < {min_slope}"
+            )
+
+        if trend == "sell" and ema_slope > -min_slope:
+            return self._empty_signal(
+                f"❌ Weak SELL trend | EMA slope={ema_slope:.6f} > -{min_slope}"
+            )
+
+        # ---------- RSI CONFIRMATION ----------
         if trend == "buy" and rsi.iloc[-1] < self.rsi_buy_level:
-            trend = None  # weaken trend
+            return self._empty_signal(
+                f"❌ BUY rejected | RSI={rsi.iloc[-1]:.2f} < {self.rsi_buy_level}"
+            )
+
         if trend == "sell" and rsi.iloc[-1] > self.rsi_sell_level:
-            trend = None
+            return self._empty_signal(
+                f"❌ SELL rejected | RSI={rsi.iloc[-1]:.2f} > {self.rsi_sell_level}"
+            )
 
-        # Momentum candle (optional)
-        if trend == "buy" and price <= open_.iloc[-1]:
-            trend = None
-        if trend == "sell" and price >= open_.iloc[-1]:
-            trend = None
+        # ---------- MOMENTUM CANDLE ----------
+        if trend == "buy" and last_close <= last_open:
+            return self._empty_signal(
+                f"❌ BUY momentum fail | close={last_close:.5f} ≤ open={last_open:.5f}"
+            )
 
-        # Volume check (optional)
+        if trend == "sell" and last_close >= last_open:
+            return self._empty_signal(
+                f"❌ SELL momentum fail | close={last_close:.5f} ≥ open={last_open:.5f}"
+            )
+
+        # ---------- VOLUME FILTER (CLOSED BAR) ----------
+        volume_ratio = None
         if self.use_volume_filter and volume is not None:
-            vol_ma = volume.rolling(self.volume_ma_period).mean().iloc[-1]
-            if volume.iloc[-1] < vol_ma:
-                trend = None
+            last_closed_vol = volume.iloc[-2]
+            vol_ma = volume.iloc[-(self.volume_ma_period + 2):-2].mean()
+            volume_ratio = last_closed_vol / vol_ma if vol_ma > 0 else 0
 
-        if trend is None:
-            return self._empty_signal("No valid signal")
+            if volume_ratio < 0.6:
+                return self._empty_signal(
+                    f"❌ Volume too low | ratio={volume_ratio:.2f} < 0.6"
+                )
 
+        # ---------- MT5 EXECUTION DATA ----------
+        if not symbol:
+            return self._empty_signal("❌ Symbol not provided")
+
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            return self._empty_signal("❌ MT5 tick unavailable")
+
+        entry_price = tick.ask if trend == "buy" else tick.bid
+
+        # ---------- SL / TP ----------
+        sl, tp = self._sl_tp(
+            entry_price=entry_price,
+            side=trend,
+            symbol=symbol,
+        )
+
+        # ---------- LOT SIZE ----------
         lot = self._get_lot_size()
-        sl, tp = self._sl_tp(price, trend)
 
+        # ---------- FINAL SIGNAL ----------
         return {
             "signal": trend,
-            "entry_price": price,
+            "entry_price": entry_price,
             "stop_loss": sl,
             "take_profit": tp,
             "entry_date": entry_time,
             "lot_size": lot,
-            "reason": "RSI trend + optional EMA slope + optional momentum + optional volume",
+            "slope":ema_slope,
+            "reason": (
+                f"✅ {trend.upper()} | "
+                f"price={'above' if trend=='buy' else 'below'} EMA({self.ema_trend}), "
+                f"slope={ema_slope:.6f}, "
+                f"RSI={rsi.iloc[-1]:.2f}, "
+                f"volume_ratio={volume_ratio if volume_ratio else 'OK'}"
+            ),
         }
+
 
     # ---------------- EMPTY ---------------- #
     def _empty_signal(self, reason: str) -> Dict[str, Any]:
