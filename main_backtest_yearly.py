@@ -144,12 +144,12 @@ symbols = [
     # "USDJPYm",  # USD/JPY
     # "AUDJPYm",
     # 100% or no blowout
-    "EURUSDm",  # EUR/USD
+    # "EURUSDm",  # EUR/USD
     "GBPUSDm",
-    "GBPJPYm",
-    "NZDJPYm",
-    "EURJPYm",
-    "CADJPYm",
+    # "GBPJPYm",
+    # "NZDJPYm",
+    # "EURJPYm",
+    # "CADJPYm",
 ]
 
 data_provider = MT5DataProvider(mt5_config)

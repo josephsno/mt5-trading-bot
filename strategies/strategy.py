@@ -1784,7 +1784,6 @@ class RSIFlexibleStrategy:
         self.ema_slope_lookback = ema_slope_lookback
         self.min_ema_slope = 0.00005
 
-
         # Volume
         self.use_volume_filter = use_volume_filter
         self.volume_ma_period = 20
@@ -1891,8 +1890,41 @@ class RSIFlexibleStrategy:
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
+    def _get_consecutive_wins(self, symbol: str, lookback_days=80) -> int:
+        if not mt5.initialize():
+            return 0
+
+        now = int(time.time())
+        from_time = now - 60 * 60 * 24 * lookback_days
+
+        deals = mt5.history_deals_get(from_time, now)
+        if not deals:
+            return 0
+
+        exit_deals = [
+            d for d in deals
+            if d.symbol == symbol
+            and d.entry == 1
+            and d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
+        ]
+
+        if not exit_deals:
+            return 0
+
+        exit_deals.sort(key=lambda d: d.time, reverse=True)
+
+        wins = 0
+        for d in exit_deals:
+            if d.profit > 0:
+                wins += 1
+            else:
+                break  # 🔥 loss resets immediately
+
+        return wins
+
+
     # ---------------- LOT SIZING ---------------- #
-    def _get_lot_size(self) -> float:
+    def _get_lot_size(self, symbol: str) -> float:
         if self.backtest_mode:
             if self.last_trade_won and self.winning_streak >= 2:
                 self.current_lot += 0.01
@@ -1901,38 +1933,16 @@ class RSIFlexibleStrategy:
             return round(self.current_lot, 2)
         # ---------- LIVE (MT5) ----------
 
-        lot = self.starting_lot
+        else:
+            wins = self._get_consecutive_wins(symbol)
+            self.current_lot = (
+                self.starting_lot
+                if wins < 2
+                else self.starting_lot + 0.01 * (wins - 1)
+            )
+            print(f"{wins} consecutive wins for {symbol}")
+            return round(self.current_lot, 2)
 
-        if not mt5.initialize():
-            return round(lot, 2)
-
-        now = int(time.time())
-        from_time = now - 60 * 60 * 24 * 30  # last 30 days
-
-        deals = mt5.history_deals_get(from_time, now)
-
-        if deals is None or len(deals) < 2:
-            return round(lot, 2)
-
-        # Get only exit deals (entry=1) for actual trades (type 0=BUY, 1=SELL)
-        exit_deals = []
-        for d in deals:
-            if d.type in [mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL] and d.entry == 1:
-                exit_deals.append(d)
-
-        # Sort by time (newest first)
-        exit_deals.sort(key=lambda d: d.time, reverse=True)
-
-        if len(exit_deals) >= 2:
-            last_profit = exit_deals[0].profit
-            second_last_profit = exit_deals[1].profit
-
-        # If you want to return them
-
-        if last_profit > 0 and second_last_profit > 0:
-            lot += 0.01  # increase after 2 wins
-
-        return round(lot, 2)
 
     def update_trade_result(self, was_win: bool):
         if was_win:
@@ -1941,18 +1951,12 @@ class RSIFlexibleStrategy:
             self.winning_streak = 0
         self.last_trade_won = was_win
 
-
     # ---------------- MAIN LOGIC ---------------- #
     def generate_signal(self, price_data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
 
         # ---------- BASIC GUARDS ----------
         if price_data is None or price_data.empty:
             return self._empty_signal("❌ Price data is empty or None")
-
-        if self._check_balance_stop():
-            return self._empty_signal(
-                f"⛔ Balance stop hit | balance={self.get_balance():.2f}"
-            )
 
         min_bars = max(
             self.rsi_period,
@@ -1986,7 +1990,8 @@ class RSIFlexibleStrategy:
         # ---------- VOLUME SERIES ----------
         volume_col = next(
             (
-                c for c in ["volume", "tick_volume", "vol", "real_volume"]
+                c
+                for c in ["volume", "tick_volume", "vol", "real_volume"]
                 if c in price_data.columns
             ),
             None,
@@ -2044,7 +2049,7 @@ class RSIFlexibleStrategy:
         volume_ratio = None
         if self.use_volume_filter and volume is not None:
             last_closed_vol = volume.iloc[-2]
-            vol_ma = volume.iloc[-(self.volume_ma_period + 2):-2].mean()
+            vol_ma = volume.iloc[-(self.volume_ma_period + 2) : -2].mean()
             volume_ratio = last_closed_vol / vol_ma if vol_ma > 0 else 0
 
             if volume_ratio < 0.6:
@@ -2070,7 +2075,7 @@ class RSIFlexibleStrategy:
         )
 
         # ---------- LOT SIZE ----------
-        lot = self._get_lot_size()
+        lot = self._get_lot_size(symbol=symbol)
 
         # ---------- FINAL SIGNAL ----------
         return {
@@ -2080,7 +2085,7 @@ class RSIFlexibleStrategy:
             "take_profit": tp,
             "entry_date": entry_time,
             "lot_size": lot,
-            "slope":ema_slope,
+            "slope": ema_slope,
             "reason": (
                 f"✅ {trend.upper()} | "
                 f"price={'above' if trend=='buy' else 'below'} EMA({self.ema_trend}), "
@@ -2089,7 +2094,6 @@ class RSIFlexibleStrategy:
                 f"volume_ratio={volume_ratio if volume_ratio else 'OK'}"
             ),
         }
-
 
     # ---------------- EMPTY ---------------- #
     def _empty_signal(self, reason: str) -> Dict[str, Any]:

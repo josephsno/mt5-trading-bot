@@ -72,12 +72,12 @@ def main():
     # 3. TRADING PARAMETERS
     # ============================================================
     SYMBOLS = [
-        "GBPJPYm",
-        "NZDJPYm",
-        "EURJPYm",
+        # "GBPJPYm",
+        # "NZDJPYm",
+        # "EURJPYm",
         "EURUSDm",  # EUR/USD
         "GBPUSDm",
-        "CADJPYm",
+        # "CADJPYm",
     ]
     TIMEFRAME = mt5.TIMEFRAME_M15
     TIMEFRAME_MINUTES = 15
