@@ -140,16 +140,7 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    # "EURUSDm",  # EUR/USD
-    # "USDJPYm",  # USD/JPY
-    # "AUDJPYm",
-    # 100% or no blowout
-    # "EURUSDm",  # EUR/USD
-    "GBPUSDm",
-    # "GBPJPYm",
-    # "NZDJPYm",
-    # "EURJPYm",
-    # "CADJPYm",
+    "NZDJPYm"
 ]
 
 data_provider = MT5DataProvider(mt5_config)

@@ -1821,14 +1821,12 @@ class RSIFlexibleStrategy:
 
     def _check_balance_stop(self):
         """
-        Stops trading if balance drops below 50% of starting balance
+        Stops trading if balance goes above 50% of starting balance
         """
         bal = self.get_balance()
-        if bal - self.starting_balance >= 0.6 * self.starting_balance:
+        if bal - self.starting_balance >= 0.9 * self.starting_balance:
             return True
-        # if abs(bal - self.starting_balance) <= 0.6 * self.starting_balance:
-        #     return True
-
+       
         else:
             return False
 
@@ -1957,6 +1955,10 @@ class RSIFlexibleStrategy:
         # ---------- BASIC GUARDS ----------
         if price_data is None or price_data.empty:
             return self._empty_signal("❌ Price data is empty or None")
+        
+        if self._check_balance_stop():
+            return self._empty_signal("❌ Price has reached full cap")
+
 
         min_bars = max(
             self.rsi_period,
@@ -2056,16 +2058,28 @@ class RSIFlexibleStrategy:
                 return self._empty_signal(
                     f"❌ Volume too low | ratio={volume_ratio:.2f} < 0.6"
                 )
+            
+        
 
         # ---------- MT5 EXECUTION DATA ----------
         if not symbol:
             return self._empty_signal("❌ Symbol not provided")
+        
 
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            return self._empty_signal("❌ MT5 tick unavailable")
-
-        entry_price = tick.ask if trend == "buy" else tick.bid
+        # Check if we're in backtest mode
+        if self.backtest_mode:
+            # Use historical data
+            entry_price = last_close
+            # Or add spread simulation:
+            # spread_pips = 1.2  # typical spread
+            # pip_size = 0.0001
+            # entry_price = last_close + (spread_pips * pip_size) if trend == "buy" else last_close - (spread_pips * pip_size)
+        else:
+            # Live trading - use MT5 tick
+            tick = mt5.symbol_info_tick(symbol)
+            if tick is None:
+                return self._empty_signal("❌ MT5 tick unavailable")
+            entry_price = tick.ask if trend == "buy" else tick.bid
 
         # ---------- SL / TP ----------
         sl, tp = self._sl_tp(
