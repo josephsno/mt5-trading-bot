@@ -2022,10 +2022,13 @@ class RSIFlexibleStrategy:
 
         # ---------- TIME FILTER ----------
         entry_time = self._get_entry_time(price_data)
+        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        weekday_num = int(pd.to_datetime(entry_time).weekday())
+        day_name = day_names[weekday_num]
 
         if not self._is_allowed_date(entry_time):
             return self._empty_signal(
-                f"📅 Day filtered out | weekday={pd.to_datetime(entry_time).weekday()}"
+                f"📅 Day filtered out | weekday={day_name}"
             )
 
         if not self._is_allowed_hour(entry_time):
