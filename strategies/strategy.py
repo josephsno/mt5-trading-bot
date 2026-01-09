@@ -1,7 +1,7 @@
 import pandas as pd
 from typing import Dict, Any, Optional
 import MetaTrader5 as mt5
-import random, time
+import random, time, datetime, pytz
 
 
 class MACDTrendStrategy:
@@ -1801,14 +1801,36 @@ class RSIFlexibleStrategy:
         if self.backtest_mode:
             return getattr(self, "current_balance", self.starting_balance)
 
-        import MetaTrader5 as mt5
-
+    def get_live_balance_from_trades(self, symbol: str = None) -> float:
+        """
+        Calculate total profit from all closed trades since beginning of current year.
+        If symbol is provided, only include trades for that symbol.
+        """
         if not mt5.initialize():
-            raise RuntimeError("MT5 not initialized")
-        account_info = mt5.account_info()
-        if account_info is None:
-            raise RuntimeError("Failed to get account info")
-        return account_info.balance
+            return 0.0
+
+        # Calculate lookback from now to beginning of current year
+        now = datetime.datetime.now()
+        year_start = datetime.datetime(now.year, 1, 1)
+
+        
+        # Use the same timestamp method as your wins function
+        now_timestamp = int(time.time())
+        from_timestamp = int(year_start.timestamp())
+        
+        # Get deals from beginning of year to now
+        deals = mt5.history_deals_get(from_timestamp, now_timestamp)
+        if not deals:
+            return 0.0
+
+        # Filter by symbol if provided
+        if symbol:
+            deals = [d for d in deals if d.symbol == symbol]
+
+        # Just give me the sum of the profits
+        profit = sum(d.profit for d in deals)
+        
+        return profit
 
     def update_balance(self, new_balance: float):
         """
@@ -1817,18 +1839,41 @@ class RSIFlexibleStrategy:
         if not self.backtest_mode:
             raise RuntimeError("Cannot manually update balance in live mode")
         self.current_balance = new_balance
-        self._check_balance_stop()
 
-    def _check_balance_stop(self):
+    def _check_balance_stop(self, symbol=None):
         """
-        Stops trading if balance goes above 50% of starting balance
+        Checks balance thresholds and decides whether to stop trading.
+
+        - Profit threshold: 70% gain over starting balance
+        - Loss threshold: 40% loss of starting balance (i.e., 60% remaining)
+
+        Returns:
+            (stop_trading: bool, reason: str)
         """
-        bal = self.get_balance()
-        if bal - self.starting_balance >= 0.9 * self.starting_balance:
-            return True
-       
+        # Get current balance
+        if self.backtest_mode:
+            bal = self.get_balance()
         else:
-            return False
+            bal = self.get_live_balance_from_trades(symbol=symbol)
+
+        print(f"⚠️ {symbol or 'Symbol'}  Current balance: {bal:.2f}")
+
+        # Profit threshold (>=70% gain)
+        if bal >= 0.6 * self.starting_balance:
+            print(
+                f"✅ {symbol or 'Symbol'} reached profit target! Current balance: {bal:.2f}"
+            )
+            return True, "profit_target"
+
+        # Loss threshold (<=60% of starting balance)
+        if bal <= -1*(0.5 * self.starting_balance):
+            print(
+                f"⚠️ {symbol or 'Symbol'} hit loss limit! Stop trading. Current balance: {bal:.2f}"
+            )
+            return True, "loss_limit"
+
+        # No stop condition met
+        return False, "ok"
 
     # ---------------- HELPERS ---------------- #
     def _get_entry_time(self, price_data: pd.DataFrame):
@@ -1900,7 +1945,8 @@ class RSIFlexibleStrategy:
             return 0
 
         exit_deals = [
-            d for d in deals
+            d
+            for d in deals
             if d.symbol == symbol
             and d.entry == 1
             and d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
@@ -1920,7 +1966,6 @@ class RSIFlexibleStrategy:
 
         return wins
 
-
     # ---------------- LOT SIZING ---------------- #
     def _get_lot_size(self, symbol: str) -> float:
         if self.backtest_mode:
@@ -1934,13 +1979,10 @@ class RSIFlexibleStrategy:
         else:
             wins = self._get_consecutive_wins(symbol)
             self.current_lot = (
-                self.starting_lot
-                if wins < 2
-                else self.starting_lot + 0.01 * (wins - 1)
+                self.starting_lot if wins < 2 else self.starting_lot + 0.01 * (wins - 1)
             )
             print(f"{wins} consecutive wins for {symbol}")
             return round(self.current_lot, 2)
-
 
     def update_trade_result(self, was_win: bool):
         if was_win:
@@ -1955,10 +1997,16 @@ class RSIFlexibleStrategy:
         # ---------- BASIC GUARDS ----------
         if price_data is None or price_data.empty:
             return self._empty_signal("❌ Price data is empty or None")
-        
-        if self._check_balance_stop():
-            return self._empty_signal("❌ Price has reached full cap")
 
+        stop, reason = self._check_balance_stop(symbol=symbol)
+        if stop:
+            # You can customize the message based on reason
+            if reason == "profit_target":
+                return self._empty_signal("✅ Price has reached profit cap")
+            elif reason == "loss_limit":
+                return self._empty_signal("⚠️ Price has reached loss limit")
+            else:
+                return self._empty_signal("❌ Trading stopped")
 
         min_bars = max(
             self.rsi_period,
@@ -2058,13 +2106,10 @@ class RSIFlexibleStrategy:
                 return self._empty_signal(
                     f"❌ Volume too low | ratio={volume_ratio:.2f} < 0.6"
                 )
-            
-        
 
         # ---------- MT5 EXECUTION DATA ----------
         if not symbol:
             return self._empty_signal("❌ Symbol not provided")
-        
 
         # Check if we're in backtest mode
         if self.backtest_mode:

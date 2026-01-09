@@ -140,7 +140,7 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    "NZDJPYm"
+    "NZDUSDm"
 ]
 
 data_provider = MT5DataProvider(mt5_config)

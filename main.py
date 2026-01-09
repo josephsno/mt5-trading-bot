@@ -72,6 +72,7 @@ def main():
     # 3. TRADING PARAMETERS
     # ============================================================
     SYMBOLS = [
+        "EURUSDm",
         "GBPJPYm",
         "NZDJPYm",
         "EURJPYm",
