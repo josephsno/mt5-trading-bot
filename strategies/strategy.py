@@ -2028,7 +2028,7 @@ class RSIFlexibleStrategy:
 
         if not self._is_allowed_date(entry_time):
             return self._empty_signal(
-                f"📅 Day filtered out | weekday={day_name}"
+                f"📅 Day filtered out | weekday = {day_name}"
             )
 
         if not self._is_allowed_hour(entry_time):
