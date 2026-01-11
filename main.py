@@ -74,10 +74,11 @@ def main():
     SYMBOLS = [
         "EURUSDm",
         "GBPJPYm",
-        "NZDJPYm",
         "EURJPYm",
         "USDJPYm",
         "CADJPYm",
+        "AUDJPYm",
+        "SGDJPYm",
     ]
     TIMEFRAME = mt5.TIMEFRAME_M15
     TIMEFRAME_MINUTES = 15

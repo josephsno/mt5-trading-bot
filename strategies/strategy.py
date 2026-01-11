@@ -1784,6 +1784,16 @@ class RSIFlexibleStrategy:
         self.ema_slope_lookback = ema_slope_lookback
         self.min_ema_slope = 0.00005
 
+        self.balance_cap: dict = {
+            "EURUSDm": {"p": 0.65, "l": 0.4},
+            "GBPJPYm": {"p": 0.6, "l": 0.4},
+            "EURJPYm": {"p": 0.8, "l": 0.4},
+            "USDJPYm": {"p": 0.8, "l": 0.4},
+            "CADJPYm": {"p": 0.8, "l": 0.4},
+            "AUDJPYm": {"p": 0.8, "l": 0.4},
+            "SGDJPYm": {"p": 0.8, "l": 0.4},
+        }
+
         # Volume
         self.use_volume_filter = use_volume_filter
         self.volume_ma_period = 20
@@ -1813,11 +1823,10 @@ class RSIFlexibleStrategy:
         now = datetime.datetime.now()
         year_start = datetime.datetime(now.year, 1, 1)
 
-        
         # Use the same timestamp method as your wins function
         now_timestamp = int(time.time())
         from_timestamp = int(year_start.timestamp())
-        
+
         # Get deals from beginning of year to now
         deals = mt5.history_deals_get(from_timestamp, now_timestamp)
         if not deals:
@@ -1829,7 +1838,7 @@ class RSIFlexibleStrategy:
 
         # Just give me the sum of the profits
         profit = sum(d.profit for d in deals)
-        
+
         return profit
 
     def update_balance(self, new_balance: float):
@@ -1853,27 +1862,33 @@ class RSIFlexibleStrategy:
         # Get current balance
         if self.backtest_mode:
             bal = self.get_balance()
+            # Profit threshold (>=70% gain)
+            if (bal - self.starting_balance) >= (1 * self.starting_balance):
+                # print(
+                #     f"✅ {symbol or 'Symbol'} reached profit target! Current balance: {bal:.2f}"
+                # )
+                return True, "profit_target"
+            return False, "ok"
         else:
             bal = self.get_live_balance_from_trades(symbol=symbol)
+            p, l = self.balance_cap.get(symbol, {"p": 0.7, "l": 0.4}).values()
+            print(f"⚠️ {symbol or 'Symbol'}  Current balance: {bal:.2f}")
+            # Profit threshold (>=70% gain)
+            if bal >= p* self.starting_balance:
+                print(
+                    f"✅ {symbol or 'Symbol'} reached profit target! Current balance: {bal:.2f}"
+                )
+                return True, "profit_target"
 
-        print(f"⚠️ {symbol or 'Symbol'}  Current balance: {bal:.2f}")
+            # Loss threshold (<=60% of starting balance)
+            if bal <= -1 * (l * self.starting_balance):
+                print(
+                    f"⚠️ {symbol or 'Symbol'} hit loss limit! Stop trading. Current balance: {bal:.2f}"
+                )
+                return True, "loss_limit"
 
-        # Profit threshold (>=70% gain)
-        if bal >= 0.6 * self.starting_balance:
-            print(
-                f"✅ {symbol or 'Symbol'} reached profit target! Current balance: {bal:.2f}"
-            )
-            return True, "profit_target"
-
-        # Loss threshold (<=60% of starting balance)
-        if bal <= -1*(0.5 * self.starting_balance):
-            print(
-                f"⚠️ {symbol or 'Symbol'} hit loss limit! Stop trading. Current balance: {bal:.2f}"
-            )
-            return True, "loss_limit"
-
-        # No stop condition met
-        return False, "ok"
+            # No stop condition met
+            return False, "ok"
 
     # ---------------- HELPERS ---------------- #
     def _get_entry_time(self, price_data: pd.DataFrame):
@@ -2022,14 +2037,20 @@ class RSIFlexibleStrategy:
 
         # ---------- TIME FILTER ----------
         entry_time = self._get_entry_time(price_data)
-        day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+        day_names = [
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
+        ]
         weekday_num = int(pd.to_datetime(entry_time).weekday())
         day_name = day_names[weekday_num]
 
         if not self._is_allowed_date(entry_time):
-            return self._empty_signal(
-                f"📅 Day filtered out | weekday = {day_name}"
-            )
+            return self._empty_signal(f"📅 Day filtered out | weekday = {day_name}")
 
         if not self._is_allowed_hour(entry_time):
             return self._empty_signal(
