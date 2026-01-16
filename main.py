@@ -176,6 +176,21 @@ def main():
 
                 print("   ✅ Trade executed" if success else "   ❌ Trade failed")
 
+        # ---------------- LIVE BALANCE UPDATE ----------------
+        balances = {}
+        for i in SYMBOLS:
+            balance = strategy.get_live_balance_from_trades(symbol=i)
+            balances[i] = balance
+
+        # Sort by balance (highest → lowest)
+        sorted_balances = dict(
+            sorted(balances.items(), key=lambda item: item[1], reverse=True)
+        )
+
+        print("\n💰 Live Balances (Highest → Lowest):")
+        for symbol, balance in sorted_balances.items():
+            print(f"   {symbol}: {balance}")
+
         print("\n✅ Cycle complete")
 
 

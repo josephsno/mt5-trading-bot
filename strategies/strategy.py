@@ -1874,7 +1874,7 @@ class RSIFlexibleStrategy:
             p, l = self.balance_cap.get(symbol, {"p": 0.7, "l": 0.4}).values()
             print(f"⚠️ {symbol or 'Symbol'}  Current balance: {bal:.2f}")
             # Profit threshold (>=70% gain)
-            if bal >= p* self.starting_balance:
+            if bal >= p * self.starting_balance:
                 print(
                     f"✅ {symbol or 'Symbol'} reached profit target! Current balance: {bal:.2f}"
                 )
