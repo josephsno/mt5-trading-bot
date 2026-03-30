@@ -1,9 +1,29 @@
 import MetaTrader5 as mt5
-from decouple import config
+from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
 from strategies.strategy import RSIFlexibleStrategy
+from datetime import datetime, timedelta
+import os
 
 
+def reload_decouple():
+
+    KEYS = [
+        "MT5_USERNAME",
+        "MT5_PASSWORD",
+        "MT5_SERVER",
+        "MT5_USERNAME_TRIAL",
+        "MT5_PASSWORD_TRIAL",
+        "MT5_SERVER_TRIAL",
+        "MT5_PATHWAY",
+    ]
+
+    for k in KEYS:
+        os.environ.pop(k, None)
+
+    AutoConfig._instances = {}
+
+reload_decouple()
 live = True
 if live:
     mt5_config = {
@@ -32,8 +52,6 @@ def normalize_price(symbol, price):
 
 
 def main():
-    from decouple import config
-    from datetime import datetime, timedelta
 
     # ============================================================
     # 1. INITIALIZE MT5
@@ -42,6 +60,7 @@ def main():
     LIVE_MODE = True
 
     def load_mt5_settings(live: bool) -> dict:
+        reload_decouple()
         return {
             "username": config("MT5_USERNAME" if live else "MT5_USERNAME_TRIAL"),
             "password": config("MT5_PASSWORD" if live else "MT5_PASSWORD_TRIAL"),

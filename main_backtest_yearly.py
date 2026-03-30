@@ -3,9 +3,9 @@ import MetaTrader5
 
 # Import your modules
 from mt5.meter_trader_config import MetaTraderConfig
-from backtests.reset import TradingSystem
+from backtests_.reset import TradingSystem
 from mt5.mt5_data_provider import MT5DataProvider
-from backtests.backtester import Backtester
+from backtests_.backtester import Backtester
 from main import project_settings
 from datetime import datetime
 import pandas as pd
@@ -140,13 +140,14 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    # "EURUSDm",  # 0.65p 0.4l
+    "EURUSDm",  # 0.65p 0.4l
     # "GBPJPYm",  # 0.6p 0.4l
     # "EURJPYm",  # 0.8p 0.4l
     # "USDJPYm",  # 0.8p 0.4l
     # "CADJPYm",  # 0.8p 0.4l
     # "AUDJPYm",  # 0.8p 0.4l
     # "SGDJPYm",  # 0.8p 0.4l
+    # "XAUUSDm"
 ]
 
 data_provider = MT5DataProvider(mt5_config)
