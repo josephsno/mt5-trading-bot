@@ -140,14 +140,15 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    "EURUSDm",  # 0.65p 0.4l
+    # "EURUSDm",  # 0.65p 0.4l
     # "GBPJPYm",  # 0.6p 0.4l
-    # "EURJPYm",  # 0.8p 0.4l
+    # "EURJPYm",  # 0.8p 0.4ljjjjjj
     # "USDJPYm",  # 0.8p 0.4l
     # "CADJPYm",  # 0.8p 0.4l
     # "AUDJPYm",  # 0.8p 0.4l
     # "SGDJPYm",  # 0.8p 0.4l
     # "XAUUSDm"
+    # "NZDJPYm"  # 0.8p 0.4l
 ]
 
 data_provider = MT5DataProvider(mt5_config)
@@ -156,5 +157,5 @@ data_provider = MT5DataProvider(mt5_config)
 yearly_results = backtest_by_year_df(symbols, start_year=2021, end_year=2026)
 
 # Export results
-yearly_results.to_csv(f"yearly_strategy_comparison.csv", index=False)
+yearly_results.to_csv(f"yearly_strategy_{'_'.join(symbols)}_comparison.csv", index=False)
 print(yearly_results)

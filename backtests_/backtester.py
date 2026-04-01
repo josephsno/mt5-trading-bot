@@ -1,5 +1,5 @@
 import pandas as pd
-from strategies.strategy import RSIFlexibleStrategy
+from strategies.strategy import RSIFlexibleStrategy,EMAPullbackStrategy
 import pytz
 
 
@@ -34,8 +34,7 @@ class Backtester:
         self.current_balance = None
         self.timeframe = timeframe
         self.strategy = RSIFlexibleStrategy(
-            sl_pips=30,  # Stop loss in pips
-            allowed_weekdays=[1, 2, 3],  # Monday-Friday trading
+            allowed_weekdays=[1,2, 3],  # Monday-Friday trading
             # allowed_hours=[8, 9, 10, 11, 12, 13, 14, 15, 16],  # London + early NY
             backtest_mode=True,
             initial_balance=100,
@@ -112,35 +111,17 @@ class Backtester:
         return trade
 
     def check_exit(self, trade, high, low, close, bar_index):
-        """
-        Check if trade should exit on current bar
-
-        Parameters:
-        -----------
-        trade : dict
-        high : float
-        low : float
-        close : float
-        bar_index : int
-
-        Returns:
-        --------
-        tuple
-            (should_exit: bool, exit_price: float, exit_reason: str)
-        """
         if trade["signal"] == "buy":
-            # Check stop loss hit
-            if low <= trade["stop_loss"]:
+            # SL must be below entry to be valid
+            if trade["stop_loss"] < trade["entry_price"] and low <= trade["stop_loss"]:
                 return True, trade["stop_loss"], "stop_loss"
-            # Check take profit hit
             if high >= trade["take_profit"]:
                 return True, trade["take_profit"], "take_profit"
 
         elif trade["signal"] == "sell":
-            # Check stop loss hit
-            if high >= trade["stop_loss"]:
+            # SL must be above entry to be valid
+            if trade["stop_loss"] > trade["entry_price"] and high >= trade["stop_loss"]:
                 return True, trade["stop_loss"], "stop_loss"
-            # Check take profit hit
             if low <= trade["take_profit"]:
                 return True, trade["take_profit"], "take_profit"
 
