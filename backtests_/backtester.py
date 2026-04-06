@@ -1,5 +1,5 @@
 import pandas as pd
-from strategies.strategy import RSIFlexibleStrategy,EMAPullbackStrategy
+from strategies.strategy import RSIFlexibleStrategyV1, RSIFlexibleStrategy
 import pytz
 
 
@@ -33,11 +33,15 @@ class Backtester:
         self.initial_balance = None
         self.current_balance = None
         self.timeframe = timeframe
+        
         self.strategy = RSIFlexibleStrategy(
             allowed_weekdays=[1,2, 3],  # Monday-Friday trading
-            # allowed_hours=[8, 9, 10, 11, 12, 13, 14, 15, 16],  # London + early NY
+            # allowed_hours=[8, 9, 10, 11, 12, 13, 14, 15, 16,17,18,19],  # London + early NY
             backtest_mode=True,
             initial_balance=100,
+            sl_pips=30,
+            use_volume_filter=False
+
         )
 
     def format_date_range(self, start_date, end_date):

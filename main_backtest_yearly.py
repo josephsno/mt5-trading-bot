@@ -140,7 +140,7 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    # "EURUSDm",  # 0.65p 0.4l
+    "EURUSDm",  # 0.65p 0.4l
     # "GBPJPYm",  # 0.6p 0.4l
     # "EURJPYm",  # 0.8p 0.4ljjjjjj
     # "USDJPYm",  # 0.8p 0.4l

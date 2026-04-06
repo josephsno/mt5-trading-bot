@@ -1001,101 +1001,129 @@ class RSIFlexibleStrategy:
 
 
 
-
-class EMAPullbackStrategy:
+class RSIFlexibleStrategyV1:
     """
-    EMA Pullback Trend Rider Strategy
-    -----------------------------------
-    - 3 EMA stack confirms trend direction (EMA20 > EMA50 > EMA200 for buys)
-    - ADX filter blocks consolidation/ranging markets
-    - Waits for price to pull back to EMA50 before entering
-    - RSI confirms pullback is ending and momentum is resuming
-    - Entry triggered by a strong momentum candle
-    - Dynamic SL based on EMA50 distance + buffer
-    - Dynamic lot sizing based on % risk of account balance
-    - 1:2 Risk/Reward ratio
+    Flexible RSI Strategy V1
+    -------------------------
+    Same core as RSIFlexibleStrategy — RSI + EMA slope + Volume + Momentum candle.
+    
+    What's new in V1 (quality filter improvements):
+    - True Wilder RSI (ewm instead of rolling mean) — more accurate signals
+    - RSI must be MOVING in the right direction (momentum confirmation)
+    - EMA slope must be ACCELERATING not just positive — trend gaining strength
+    - Volume filter tightened — needs stronger participation on signal candle
+    - Added Higher Timeframe RSI bias — only trade when HTF RSI agrees
+    - 1:1.5 RR instead of 1:1 — winners now pay more than losers cost
+    - Risk % based lot sizing — scales with account balance
+    - Daily loss limit is now a parameter
+    - Fixed live mode get_balance() returning None
     """
 
     def __init__(
         self,
+        sl_pips: float = 20.0,
         allowed_weekdays: Optional[list] = None,
         allowed_hours: Optional[list] = None,
-        risk_percent: float = 2.0,          # % of balance to risk per trade
+        risk_percent: float = 1.0,          # % of balance to risk per trade
         min_lot: float = 0.01,
         max_lot: float = 5.0,
-        ema_fast: int = 20,
-        ema_mid: int = 50,
-        ema_slow: int = 200,
-        adx_period: int = 14,
-        adx_min_threshold: float = 25.0,    # min ADX to allow trading
-        adx_max_threshold: float = 60.0,    # max ADX to avoid blow-off moves
         rsi_period: int = 14,
-        rsi_buy_zone_low: float = 35.0,     # RSI must be in this zone on pullback
-        rsi_buy_zone_high: float = 55.0,
-        rsi_sell_zone_low: float = 45.0,
-        rsi_sell_zone_high: float = 65.0,
-        sl_buffer_pips: float = 5.0,        # buffer pips beyond EMA50 for SL
-        pullback_tolerance_pips: float = 15.0,  # how close price must be to EMA50
-        rr_ratio: float = 2.0,              # risk/reward ratio
+        rsi_buy_level: float = 35,
+        rsi_sell_level: float = 65,
+        ema_trend: int = 50,
+        ema_slope_lookback: int = 5,
+
+        # V1: RSI momentum — RSI must be moving in the right direction
+        rsi_momentum_lookback: int = 3,     # RSI must have risen/fallen over last N bars
+
+        # V1: EMA slope acceleration — slope now vs slope N bars ago
+        slope_accel_lookback: int = 3,      # slope must be steeper than N bars ago
+
+        # V1: HTF RSI bias — simple proxy using a longer RSI period
+        htf_rsi_period: int = 50,           # longer RSI acts as higher TF bias
+        use_htf_rsi: bool = True,
+
+        # V1: Volume
+        use_volume_filter: bool = True,
+        volume_ratio_min: float = 0.8,      # tightened from 0.6
+
+        # V1: RR ratio now a parameter
+        rr_ratio: float = 1.5,
+
+        # V1: Daily loss limit now a parameter
+        daily_loss_pct: float = 0.02,       # 2% of starting balance
+
+        # Balance protection
+        profit_target_pct: float = 0.60,
+        loss_limit_pct: float = 0.40,
+
         backtest_mode: bool = False,
         initial_balance: float = 100.0,
     ):
-        # Time filters
+        self.sl_pips = sl_pips
         self.allowed_weekdays = allowed_weekdays or list(range(7))
         self.allowed_hours = allowed_hours or list(range(24))
 
-        # Risk management
         self.risk_percent = risk_percent
         self.min_lot = min_lot
         self.max_lot = max_lot
-        self.rr_ratio = rr_ratio
 
-        # EMA periods
-        self.ema_fast = ema_fast
-        self.ema_mid = ema_mid
-        self.ema_slow = ema_slow
-
-        # ADX settings
-        self.adx_period = adx_period
-        self.adx_min_threshold = adx_min_threshold
-        self.adx_max_threshold = adx_max_threshold
-
-        # RSI settings
         self.rsi_period = rsi_period
-        self.rsi_buy_zone_low = rsi_buy_zone_low
-        self.rsi_buy_zone_high = rsi_buy_zone_high
-        self.rsi_sell_zone_low = rsi_sell_zone_low
-        self.rsi_sell_zone_high = rsi_sell_zone_high
+        self.rsi_buy_level = rsi_buy_level
+        self.rsi_sell_level = rsi_sell_level
 
-        # Pullback settings
-        self.sl_buffer_pips = sl_buffer_pips
-        self.pullback_tolerance_pips = pullback_tolerance_pips
+        self.ema_trend = ema_trend
+        self.ema_slope_lookback = ema_slope_lookback
+        self.min_ema_slope = 0.00005
 
-        # Balance
+        self.rsi_momentum_lookback = rsi_momentum_lookback
+        self.slope_accel_lookback = slope_accel_lookback
+
+        self.htf_rsi_period = htf_rsi_period
+        self.use_htf_rsi = use_htf_rsi
+
+        self.use_volume_filter = use_volume_filter
+        self.volume_ratio_min = volume_ratio_min
+        self.volume_ma_period = 20
+
+        self.rr_ratio = rr_ratio
+        self.daily_loss_pct = daily_loss_pct
+        self.profit_target_pct = profit_target_pct
+        self.loss_limit_pct = loss_limit_pct
+
         self.backtest_mode = backtest_mode
         self.starting_balance = initial_balance
         self.current_balance = initial_balance
 
-        # Trade tracking (for streak/result awareness)
         self.winning_streak = 0
         self.last_trade_won = False
 
-        # Balance protection thresholds
-        self.profit_target_pct = 0.60   # stop at +60%
-        self.loss_limit_pct = 0.60      # stop at -60%
-
-        # Expose these so backtester can read them (same as RSIFlexibleStrategy)
-        self.ema_period = self.ema_slow   # used in backtester min_bars_needed
+        # Used by backtester
+        self.ema_period = self.ema_trend
         self.ltf_rsi_period = self.rsi_period
-        self.htf_rsi_period = self.rsi_period
+        self.htf_rsi_period = self.htf_rsi_period
+
+        self.balance_cap: dict = {
+            "EURUSDm": {"p": 0.5, "l": 0.4},
+            "GBPJPYm": {"p": 0.5, "l": 0.4},
+            "EURJPYm": {"p": 0.5, "l": 0.4},
+            "USDJPYm": {"p": 0.5, "l": 0.4},
+            "CADJPYm": {"p": 0.5, "l": 0.4},
+            "AUDJPYm": {"p": 0.5, "l": 0.4},
+            "SGDJPYm": {"p": 0.5, "l": 0.4},
+        }
+
+        # Backtest trade log for daily loss check
+        self.trade_log = []
 
     # ─────────────────────────────────────────────
-    # BALANCE MANAGEMENT  (mirrors RSIFlexibleStrategy)
+    # BALANCE MANAGEMENT
     # ─────────────────────────────────────────────
 
     def get_balance(self) -> float:
         if self.backtest_mode:
             return self.current_balance
+        # V1 FIX: live mode no longer returns None
         try:
             import MetaTrader5 as mt5
             info = mt5.account_info()
@@ -1108,17 +1136,67 @@ class EMAPullbackStrategy:
             raise RuntimeError("Cannot manually update balance in live mode")
         self.current_balance = new_balance
 
+    def get_live_balance_from_trades(self, symbol: str = None) -> float:
+        now = datetime.datetime.now()
+        year_start = datetime.datetime(now.year, 1, 1)
+        now_timestamp = int(time.time())
+        from_timestamp = int(year_start.timestamp())
+        try:
+            import MetaTrader5 as mt5
+            deals = mt5.history_deals_get(from_timestamp, now_timestamp)
+            if symbol:
+                deals = [d for d in deals if d.symbol == symbol]
+            return sum(d.profit for d in deals)
+        except Exception:
+            return 0.0
+
     def _check_balance_stop(self, symbol=None):
-        bal = self.get_balance()
-        gain = bal - self.starting_balance
-        if gain >= self.profit_target_pct * self.starting_balance:
-            return True, "profit_target"
-        if gain <= -(self.loss_limit_pct * self.starting_balance):
-            return True, "loss_target"
-        return False, "ok"
+        if self.backtest_mode:
+            bal = self.get_balance()
+            gain = bal - self.starting_balance
+            if gain >= self.profit_target_pct * self.starting_balance:
+                return True, "profit_target"
+            if gain <= -(self.loss_limit_pct * self.starting_balance):
+                return True, "loss_target"
+            return False, "ok"
+        else:
+            bal = self.get_live_balance_from_trades(symbol=symbol)
+            p, l = self.balance_cap.get(symbol, {"p": 0.6, "l": 0.4}).values()
+            if bal >= p * self.starting_balance:
+                return True, "profit_target"
+            if bal <= -(l * self.starting_balance):
+                return True, "loss_limit"
+            return False, "ok"
+
+    def _check_daily_loss(self, price_data: pd.DataFrame = None) -> bool:
+        if self.backtest_mode:
+            current_time = pd.to_datetime(self._get_entry_time(price_data))
+            day_start = current_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            if not self.trade_log:
+                return False
+
+            daily_pnl = sum(
+                t['pnl'] for t in self.trade_log
+                if day_start <= pd.to_datetime(t['exit_time']) <= current_time
+            )
+        else:
+            try:
+                import MetaTrader5 as mt5
+                now = datetime.datetime.now()
+                day_start = datetime.datetime(now.year, now.month, now.day)
+                deals = mt5.history_deals_get(int(day_start.timestamp()), int(time.time()))
+                daily_pnl = sum(d.profit for d in deals) if deals else 0
+            except Exception:
+                return False
+
+        # V1: daily loss limit is now a parameter
+        daily_limit = -(self.daily_loss_pct * self.starting_balance)
+        if daily_pnl <= daily_limit:
+            return True
+        return False
 
     def update_trade_result(self, was_win: bool):
-        """Called by backtester after each trade closes — mirrors RSIFlexibleStrategy"""
         if was_win:
             self.winning_streak += 1
         else:
@@ -1128,35 +1206,6 @@ class EMAPullbackStrategy:
     # ─────────────────────────────────────────────
     # HELPERS
     # ─────────────────────────────────────────────
-
-    
-    def get_live_balance_from_trades(self, symbol: str = None) -> float:
-        """
-        Calculate total profit from all closed trades since beginning of current year.
-        If symbol is provided, only include trades for that symbol.
-        """
-
-        # Calculate lookback from now to beginning of current year
-        now = datetime.datetime.now()
-        year_start = datetime.datetime(now.year, 1, 1)
-
-        # Use the same timestamp method as your wins function
-        now_timestamp = int(time.time())
-        from_timestamp = int(year_start.timestamp())
-
-        # Get deals from beginning of year to now
-        deals = mt5.history_deals_get(from_timestamp, now_timestamp)
-       
-        # Filter by symbol if provided
-        if symbol:
-            deals = [d for d in deals if d.symbol == symbol]
-
-        # Just give me the sum of the profits
-        profit = sum(d.profit for d in deals)
-
-        return profit
-
-
 
     def _get_entry_time(self, price_data: pd.DataFrame):
         if "time" in price_data.columns:
@@ -1176,86 +1225,47 @@ class EMAPullbackStrategy:
         return pd.to_datetime(timestamp).hour in self.allowed_hours
 
     def _pip_size(self, symbol: str) -> float:
-        if "JPY" in symbol:
-            return 0.01
         if symbol.startswith("XAU"):
             return 0.1
+        if "JPY" in symbol:
+            return 0.01
         return 0.0001
 
     def _pip_value_per_lot(self, symbol: str) -> float:
-        """USD value of 1 pip for 1 standard lot"""
         if "JPY" in symbol:
-            return 9.0      # approx — varies with rate
+            return 9.0
         if symbol.startswith("XAU"):
             return 10.0
-        return 10.0         # standard USD quote pairs
+        return 10.0
 
     # ─────────────────────────────────────────────
     # INDICATORS
     # ─────────────────────────────────────────────
 
-    def _calculate_rsi(self, close: pd.Series) -> pd.Series:
+    def _calculate_rsi(self, close: pd.Series, period: int) -> pd.Series:
+        """V1: True Wilder RSI using ewm instead of rolling mean"""
         delta = close.diff()
         gain = delta.clip(lower=0)
         loss = -delta.clip(upper=0)
-        avg_gain = gain.ewm(com=self.rsi_period - 1, min_periods=self.rsi_period).mean()
-        avg_loss = loss.ewm(com=self.rsi_period - 1, min_periods=self.rsi_period).mean()
+        avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+        avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
-
-    def _calculate_adx(self, high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-        """
-        Wilder's ADX — measures trend strength regardless of direction.
-        Returns ADX series.
-        """
-        period = self.adx_period
-
-        # True Range
-        prev_close = close.shift(1)
-        tr = pd.concat([
-            high - low,
-            (high - prev_close).abs(),
-            (low - prev_close).abs()
-        ], axis=1).max(axis=1)
-
-        # Directional moves
-        up_move = high - high.shift(1)
-        down_move = low.shift(1) - low
-
-        plus_dm = pd.Series(0.0, index=high.index)
-        minus_dm = pd.Series(0.0, index=high.index)
-
-        plus_dm[((up_move > down_move) & (up_move > 0))] = up_move
-        minus_dm[((down_move > up_move) & (down_move > 0))] = down_move
-
-        # Wilder smoothing
-        atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-        plus_di = 100 * (plus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr)
-        minus_di = 100 * (minus_dm.ewm(alpha=1 / period, min_periods=period, adjust=False).mean() / atr)
-
-        dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1))
-        adx = dx.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
-
-        return adx
 
     # ─────────────────────────────────────────────
     # LOT SIZING
     # ─────────────────────────────────────────────
 
-    def _calculate_lot_size(self, symbol: str, sl_pips: float) -> float:
-        """
-        Dynamic lot size based on % risk of current balance.
-
-        lot = risk_amount / (sl_pips * pip_value_per_lot)
-        """
+    def _calculate_lot_size(self, symbol: str) -> float:
+        """V1: Risk % based lot sizing — scales with account balance"""
         balance = self.get_balance()
         risk_amount = balance * (self.risk_percent / 100)
         pip_val = self._pip_value_per_lot(symbol)
 
-        if sl_pips <= 0 or pip_val <= 0:
+        if self.sl_pips <= 0 or pip_val <= 0:
             return self.min_lot
 
-        lot = risk_amount / (sl_pips * pip_val)
+        lot = risk_amount / (self.sl_pips * pip_val)
         lot = max(self.min_lot, min(round(lot, 2), self.max_lot))
         return lot
 
@@ -1263,40 +1273,23 @@ class EMAPullbackStrategy:
     # SL / TP
     # ─────────────────────────────────────────────
 
-    def _sl_tp(self, entry_price: float, side: str, ema50: float, symbol: str):
-        """
-        Dynamic SL/TP:
-        - SL is placed beyond EMA50 + buffer pips
-        - TP is SL distance * rr_ratio
-        """
+    def _sl_tp(self, entry_price: float, side: str, symbol: str):
+        """V1: RR ratio is now a parameter — default 1:1.5"""
         pip = self._pip_size(symbol)
-        buffer = self.sl_buffer_pips * pip
-
-        if side == "buy":
-            sl_distance = entry_price - (ema50 - buffer)
-        else:
-            sl_distance = (ema50 + buffer) - entry_price
-
-        # Floor ONCE — everything derives from this
-        sl_distance = max(sl_distance, pip * 10)
-        sl_pips = sl_distance / pip
-
-        # Build SL and TP from the same floored distance
-        if side == "buy":
-            sl = entry_price - sl_distance
-            tp = entry_price + (sl_distance * self.rr_ratio)
-        else:
-            sl = entry_price + sl_distance
-            tp = entry_price - (sl_distance * self.rr_ratio)
-
-        # Sanity check
-        if side == "buy" and sl >= entry_price:
-            return None, None, None
-        if side == "sell" and sl <= entry_price:
-            return None, None, None
-
         digits = 3 if ("JPY" in symbol or symbol.startswith("XAU")) else 5
-        return round(sl, digits), round(tp, digits), round(sl_pips, 1)
+
+        sl_distance = self.sl_pips * pip
+        tp_distance = sl_distance * self.rr_ratio
+
+        if side == "buy":
+            sl = round(entry_price - sl_distance, digits)
+            tp = round(entry_price + tp_distance, digits)
+        else:
+            sl = round(entry_price + sl_distance, digits)
+            tp = round(entry_price - tp_distance, digits)
+
+        return sl, tp
+
     # ─────────────────────────────────────────────
     # MAIN SIGNAL GENERATION
     # ─────────────────────────────────────────────
@@ -1305,7 +1298,7 @@ class EMAPullbackStrategy:
 
         # ── GUARD: empty data ──
         if price_data is None or price_data.empty:
-            return self._empty_signal("❌ Price data empty")
+            return self._empty_signal("❌ Price data is empty or None")
 
         # ── GUARD: balance protection ──
         stop, reason = self._check_balance_stop(symbol=symbol)
@@ -1313,8 +1306,17 @@ class EMAPullbackStrategy:
             msg = "✅ Profit target reached" if reason == "profit_target" else "⚠️ Loss limit reached"
             return self._empty_signal(msg)
 
+        # ── GUARD: daily loss ──
+        if self._check_daily_loss(price_data=price_data):
+            return self._empty_signal("🛑 Daily loss limit hit — no more trades today")
+
         # ── GUARD: enough bars ──
-        min_bars = self.ema_slow + self.adx_period + 10
+        min_bars = max(
+            self.htf_rsi_period,
+            self.ema_trend,
+            self.volume_ma_period + 2,
+        ) + self.slope_accel_lookback + 5
+
         if len(price_data) < min_bars:
             return self._empty_signal(f"❌ Not enough bars | {len(price_data)} < {min_bars}")
 
@@ -1326,88 +1328,101 @@ class EMAPullbackStrategy:
             return self._empty_signal(f"⏰ Hour filtered | hour={pd.to_datetime(entry_time).hour}")
 
         # ── PRICE SERIES ──
-        close = price_data["close"]
-        high  = price_data["high"]
-        low   = price_data["low"]
-        open_ = price_data["open"]
+        close  = price_data["close"]
+        open_  = price_data["open"]
+        high   = price_data["high"]
+        low    = price_data["low"]
 
         # ── INDICATORS ──
-        ema20  = close.ewm(span=self.ema_fast,  adjust=False).mean()
-        ema50  = close.ewm(span=self.ema_mid,   adjust=False).mean()
-        ema200 = close.ewm(span=self.ema_slow,  adjust=False).mean()
-        rsi    = self._calculate_rsi(close)
-        adx    = self._calculate_adx(high, low, close)
+        ema   = close.ewm(span=self.ema_trend, adjust=False).mean()
+        rsi   = self._calculate_rsi(close, self.rsi_period)
+        htf_rsi = self._calculate_rsi(close, self.htf_rsi_period)
 
-        # Current values
         last_close  = close.iloc[-1]
         last_open   = open_.iloc[-1]
-        last_ema20  = ema20.iloc[-1]
-        last_ema50  = ema50.iloc[-1]
-        last_ema200 = ema200.iloc[-1]
+        last_ema    = ema.iloc[-1]
         last_rsi    = rsi.iloc[-1]
-        last_adx    = adx.iloc[-1]
+        last_htf_rsi = htf_rsi.iloc[-1]
 
-        pip = self._pip_size(symbol)
+        # ── FILTER 1: Trend direction (price vs EMA) ──
+        trend = "buy" if last_close >= last_ema else "sell"
 
-        # ── FILTER 1: ADX — must be trending ──
-        if last_adx < self.adx_min_threshold:
-            return self._empty_signal(f"🚫 Consolidation | ADX={last_adx:.1f} < {self.adx_min_threshold}")
-        if last_adx > self.adx_max_threshold:
-            return self._empty_signal(f"🚫 Blow-off move | ADX={last_adx:.1f} > {self.adx_max_threshold}")
+        # ── FILTER 2: EMA slope must be active ──
+        ema_slope = ema.iloc[-1] - ema.iloc[-self.ema_slope_lookback]
 
-        # ── FILTER 2: EMA Stack — all 3 must be aligned ──
-        bullish_stack = last_ema20 > last_ema50 > last_ema200
-        bearish_stack = last_ema20 < last_ema50 < last_ema200
+        if trend == "buy" and ema_slope < self.min_ema_slope:
+            return self._empty_signal(f"❌ Weak BUY slope | slope={ema_slope:.6f}")
+        if trend == "sell" and ema_slope > -self.min_ema_slope:
+            return self._empty_signal(f"❌ Weak SELL slope | slope={ema_slope:.6f}")
 
-        if not bullish_stack and not bearish_stack:
+        # ── V1 FILTER 3: EMA slope must be ACCELERATING ──
+        # Current slope vs slope N bars ago — trend must be gaining strength
+        prev_slope = ema.iloc[-1 - self.slope_accel_lookback] - ema.iloc[-1 - self.slope_accel_lookback - self.ema_slope_lookback]
+
+        if trend == "buy" and ema_slope < prev_slope:
             return self._empty_signal(
-                f"❌ EMA stack not aligned | "
-                f"EMA20={last_ema20:.5f} EMA50={last_ema50:.5f} EMA200={last_ema200:.5f}"
+                f"❌ BUY slope decelerating | now={ema_slope:.6f} prev={prev_slope:.6f}"
+            )
+        if trend == "sell" and ema_slope > prev_slope:
+            return self._empty_signal(
+                f"❌ SELL slope decelerating | now={ema_slope:.6f} prev={prev_slope:.6f}"
             )
 
-        trend = "buy" if bullish_stack else "sell"
+        # ── FILTER 4: RSI level confirmation ──
+        if trend == "buy" and last_rsi < self.rsi_buy_level:
+            return self._empty_signal(f"❌ BUY rejected | RSI={last_rsi:.2f} < {self.rsi_buy_level}")
+        if trend == "sell" and last_rsi > self.rsi_sell_level:
+            return self._empty_signal(f"❌ SELL rejected | RSI={last_rsi:.2f} > {self.rsi_sell_level}")
 
-        # ── FILTER 3: Pullback to EMA50 ──
-        # Price must be within pullback_tolerance_pips of EMA50
-        distance_to_ema50 = abs(last_close - last_ema50) / pip
-        tolerance = self.pullback_tolerance_pips
+        # ── V1 FILTER 5: RSI must be MOVING in the right direction ──
+        # RSI now vs RSI N bars ago — momentum must be picking up
+        prev_rsi = rsi.iloc[-1 - self.rsi_momentum_lookback]
 
-        if distance_to_ema50 > tolerance:
+        if trend == "buy" and last_rsi <= prev_rsi:
             return self._empty_signal(
-                f"⏳ Waiting for pullback | "
-                f"Distance to EMA50={distance_to_ema50:.1f} pips > {tolerance} pips"
+                f"❌ RSI not rising for BUY | now={last_rsi:.1f} prev={prev_rsi:.1f}"
+            )
+        if trend == "sell" and last_rsi >= prev_rsi:
+            return self._empty_signal(
+                f"❌ RSI not falling for SELL | now={last_rsi:.1f} prev={prev_rsi:.1f}"
             )
 
-        # Price must still be on the correct side of EMA200 (not broken through)
-        if trend == "buy" and last_close < last_ema200:
-            return self._empty_signal("❌ BUY pullback broke below EMA200")
-        if trend == "sell" and last_close > last_ema200:
-            return self._empty_signal("❌ SELL pullback broke above EMA200")
-
-        # ── FILTER 4: RSI in pullback zone ──
-        if trend == "buy":
-            if not (self.rsi_buy_zone_low <= last_rsi <= self.rsi_buy_zone_high):
+        # ── V1 FILTER 6: HTF RSI bias ──
+        # Longer period RSI acts as higher timeframe bias
+        # Only take trades when HTF RSI agrees with direction
+        if self.use_htf_rsi:
+            if trend == "buy" and last_htf_rsi < 50:
                 return self._empty_signal(
-                    f"❌ RSI not in BUY pullback zone | RSI={last_rsi:.1f} "
-                    f"(need {self.rsi_buy_zone_low}-{self.rsi_buy_zone_high})"
+                    f"❌ HTF RSI bearish for BUY | HTF RSI={last_htf_rsi:.1f} < 50"
                 )
-        else:
-            if not (self.rsi_sell_zone_low <= last_rsi <= self.rsi_sell_zone_high):
+            if trend == "sell" and last_htf_rsi > 50:
                 return self._empty_signal(
-                    f"❌ RSI not in SELL pullback zone | RSI={last_rsi:.1f} "
-                    f"(need {self.rsi_sell_zone_low}-{self.rsi_sell_zone_high})"
+                    f"❌ HTF RSI bullish for SELL | HTF RSI={last_htf_rsi:.1f} > 50"
                 )
 
-        # ── FILTER 5: Momentum candle ──
-        # Current candle must confirm resumption of trend
+        # ── FILTER 7: Momentum candle ──
         if trend == "buy" and last_close <= last_open:
-            return self._empty_signal(
-                f"❌ BUY momentum candle fail | close={last_close:.5f} ≤ open={last_open:.5f}"
-            )
+            return self._empty_signal(f"❌ BUY momentum fail | close≤open")
         if trend == "sell" and last_close >= last_open:
-            return self._empty_signal(
-                f"❌ SELL momentum candle fail | close={last_close:.5f} ≥ open={last_open:.5f}"
+            return self._empty_signal(f"❌ SELL momentum fail | close≥open")
+
+        # ── V1 FILTER 8: Volume — tightened threshold ──
+        volume_ratio = None
+        if self.use_volume_filter:
+            vol_col = next(
+                (c for c in ["volume", "tick_volume", "vol", "real_volume"] if c in price_data.columns),
+                None,
             )
+            if vol_col:
+                volume = price_data[vol_col]
+                last_vol = volume.iloc[-2]  # closed bar volume
+                vol_ma = volume.iloc[-(self.volume_ma_period + 2):-2].mean()
+                volume_ratio = last_vol / vol_ma if vol_ma > 0 else 0
+
+                if volume_ratio < self.volume_ratio_min:
+                    return self._empty_signal(
+                        f"❌ Volume too low | ratio={volume_ratio:.2f} < {self.volume_ratio_min}"
+                    )
 
         # ── ENTRY PRICE ──
         if self.backtest_mode:
@@ -1423,13 +1438,10 @@ class EMAPullbackStrategy:
                 entry_price = last_close
 
         # ── SL / TP ──
-        sl, tp, sl_pips = self._sl_tp(entry_price, trend, last_ema50, symbol)
-
-        if sl is None:
-            return self._empty_signal("❌ Invalid SL — EMA50 wrong side of entry")
+        sl, tp = self._sl_tp(entry_price, trend, symbol)
 
         # ── LOT SIZE ──
-        lot = self._calculate_lot_size(symbol, sl_pips)
+        lot = self._calculate_lot_size(symbol)
 
         # ── FINAL SIGNAL ──
         return {
@@ -1439,23 +1451,22 @@ class EMAPullbackStrategy:
             "take_profit": tp,
             "entry_date": entry_time,
             "lot_size": lot,
-            "adx": last_adx,
-            "rsi": last_rsi,
-            "ema50": last_ema50,
-            "sl_pips": sl_pips,
-            "distance_to_ema50": round(distance_to_ema50, 1),
+            "rsi": round(last_rsi, 2),
+            "htf_rsi": round(last_htf_rsi, 2),
+            "slope": round(ema_slope, 6),
+            "volume_ratio": round(volume_ratio, 2) if volume_ratio else "N/A",
             "reason": (
-                f"✅ {trend.upper()} PULLBACK | "
-                f"ADX={last_adx:.1f} | "
-                f"RSI={last_rsi:.1f} | "
-                f"EMA50={last_ema50:.5f} | "
-                f"SL={sl_pips} pips | "
+                f"✅ {trend.upper()} | "
+                f"EMA{self.ema_trend} slope={ema_slope:.6f} accelerating | "
+                f"RSI={last_rsi:.1f} moving {'up' if trend == 'buy' else 'down'} | "
+                f"HTF RSI={last_htf_rsi:.1f} | "
+                f"Vol ratio={volume_ratio if volume_ratio else 'N/A'} | "
                 f"Lot={lot}"
             ),
         }
 
     # ─────────────────────────────────────────────
-    # EMPTY SIGNAL  (mirrors RSIFlexibleStrategy)
+    # EMPTY SIGNAL
     # ─────────────────────────────────────────────
 
     def _empty_signal(self, reason: str) -> Dict[str, Any]:
@@ -1470,32 +1481,36 @@ class EMAPullbackStrategy:
         }
 
     # ─────────────────────────────────────────────
-    # PARAMETERS / REPR  (mirrors RSIFlexibleStrategy)
+    # PARAMETERS / REPR
     # ─────────────────────────────────────────────
 
     def get_parameters(self) -> Dict[str, Any]:
         return {
-            "name": "EMA Pullback Trend Rider",
-            "ema_fast": self.ema_fast,
-            "ema_mid": self.ema_mid,
-            "ema_slow": self.ema_slow,
-            "adx_period": self.adx_period,
-            "adx_min": self.adx_min_threshold,
-            "adx_max": self.adx_max_threshold,
-            "rsi_period": self.rsi_period,
-            "rsi_buy_zone": f"{self.rsi_buy_zone_low}-{self.rsi_buy_zone_high}",
-            "rsi_sell_zone": f"{self.rsi_sell_zone_low}-{self.rsi_sell_zone_high}",
-            "sl_buffer_pips": self.sl_buffer_pips,
-            "pullback_tolerance_pips": self.pullback_tolerance_pips,
-            "risk_percent": self.risk_percent,
+            "name": "RSI Flexible Strategy V1",
+            "sl_pips": self.sl_pips,
             "rr_ratio": self.rr_ratio,
+            "rsi_period": self.rsi_period,
+            "rsi_buy_level": self.rsi_buy_level,
+            "rsi_sell_level": self.rsi_sell_level,
+            "htf_rsi_period": self.htf_rsi_period,
+            "use_htf_rsi": self.use_htf_rsi,
+            "ema_trend": self.ema_trend,
+            "ema_slope_lookback": self.ema_slope_lookback,
+            "slope_accel_lookback": self.slope_accel_lookback,
+            "rsi_momentum_lookback": self.rsi_momentum_lookback,
+            "volume_filter": self.use_volume_filter,
+            "volume_ratio_min": self.volume_ratio_min,
+            "risk_percent": self.risk_percent,
+            "daily_loss_pct": self.daily_loss_pct,
         }
 
     def __repr__(self) -> str:
+        p = self.get_parameters()
         return (
-            f"EMAPullbackStrategy("
-            f"EMA{self.ema_fast}/{self.ema_mid}/{self.ema_slow}, "
-            f"ADX>{self.adx_min_threshold}, "
-            f"RR=1:{self.rr_ratio}, "
-            f"Risk={self.risk_percent}%)"
+            f"RSIFlexibleStrategyV1("
+            f"RSI{p['rsi_period']} HTF{p['htf_rsi_period']} | "
+            f"EMA{p['ema_trend']} | "
+            f"SL={p['sl_pips']} pips | "
+            f"RR=1:{p['rr_ratio']} | "
+            f"Risk={p['risk_percent']}%)"
         )
