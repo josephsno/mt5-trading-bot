@@ -672,7 +672,7 @@ class RSIFlexibleStrategy:
 
             daily_pnl = sum(d.profit for d in deals)
 
-        daily_limit = -0.02* self.starting_balance
+        daily_limit = -0.1* self.starting_balance
 
         if daily_pnl <= daily_limit:
             print(f"🛑 Daily loss limit hit | PnL today: {daily_pnl:.2f}")
@@ -734,7 +734,7 @@ class RSIFlexibleStrategy:
         rs = avg_gain / avg_loss
         return 100 - (100 / (1 + rs))
 
-    def _get_consecutive_wins(self, symbol: str, lookback_days=80) -> int:
+    def _get_consecutive_wins(self, symbol: str, lookback_days=30) -> int:
         if not mt5.initialize():
             return 0
 
@@ -745,28 +745,33 @@ class RSIFlexibleStrategy:
         if not deals:
             return 0
 
+        # Include all executed trade types
+        allowed_types = (
+            mt5.DEAL_TYPE_BUY,
+            mt5.DEAL_TYPE_SELL,
+
+        )
+
         exit_deals = [
-            d
-            for d in deals
-            if d.symbol == symbol
-            and d.entry == 1
-            and d.type in (mt5.DEAL_TYPE_BUY, mt5.DEAL_TYPE_SELL)
+            d for d in deals
+            if d.symbol == symbol and d.entry == 1 and d.type in allowed_types
         ]
 
         if not exit_deals:
             return 0
 
+        # Sort most recent first
         exit_deals.sort(key=lambda d: d.time, reverse=True)
 
+        # Count consecutive wins
         wins = 0
         for d in exit_deals:
             if d.profit > 0:
                 wins += 1
             else:
-                break  # 🔥 loss resets immediately
+                break  # loss resets streak
 
         return wins
-
     # ---------------- LOT SIZING ---------------- #
     def _get_lot_size(self, symbol: str) -> float:
         if self.backtest_mode:
@@ -775,14 +780,15 @@ class RSIFlexibleStrategy:
             else:
                 self.current_lot = self.starting_lot
             return round(self.current_lot, 2)
-        # ---------- LIVE (MT5) ----------
 
+        # ---------- LIVE (MT5) ----------
         else:
             wins = self._get_consecutive_wins(symbol)
+            # Lot increases after 2 consecutive wins
             self.current_lot = (
                 self.starting_lot if wins < 2 else self.starting_lot + 0.01 * (wins - 1)
             )
-            print(f"{wins} consecutive wins for {symbol}")
+            print(f"{symbol} consecutive wins counted: {wins} | lot set to {self.current_lot}")
             return round(self.current_lot, 2)
 
     def update_trade_result(self, was_win: bool):
