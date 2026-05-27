@@ -1,5 +1,5 @@
 import pandas as pd
-from strategies.strategy import RSIFlexibleStrategyV1, RSIFlexibleStrategy
+from strategies.strategy import RSIFlexibleStrategy
 import pytz
 
 
@@ -33,17 +33,27 @@ class Backtester:
         self.initial_balance = None
         self.current_balance = None
         self.timeframe = timeframe
-        
+
+        # self.strategy = RSIFlexibleStrategy(
+        #     allowed_weekdays=[1, 2, 3],  # Monday-Friday trading
+        #     backtest_mode=True,
+        #     initial_balance=100,
+        #     sl_pips=30,
+        #     use_volume_filter=False,
+        # )
+        # self.strategy.min_ema_slope = 0.0008
+
         self.strategy = RSIFlexibleStrategy(
-            allowed_weekdays=[1,2, 3],  # Monday-Friday trading
-            # allowed_hours=[8, 9, 10, 11, 12, 13, 14, 15, 16,17,18,19],  # London + early NY
+            allowed_weekdays=[1, 2, 3],  # Monday-Friday trading
             backtest_mode=True,
             initial_balance=100,
             sl_pips=30,
-            use_volume_filter=False
+            use_volume_filter=False,
+            min_ema_slope = 0.0005
 
         )
 
+        
     def format_date_range(self, start_date, end_date):
         delta_days = (end_date - start_date).days
 
@@ -154,7 +164,7 @@ class Backtester:
         if is_jpy:
             pip_value_001 = 1.91 / 30
         elif is_xau:
-            pip_value_001 = 1.0 / 10   # XAU: $1 per 10 cent move @ 0.01
+            pip_value_001 = 1.0 / 10  # XAU: $1 per 10 cent move @ 0.01
         else:
             pip_value_001 = 3.00 / 30  # ✅ EURUSDm correctly hits here = $0.10/pip
 
@@ -172,7 +182,6 @@ class Backtester:
         trade["pnl_r"] = round(pnl_r, 2)
 
         return trade
-
 
     def update_balance(self, pnl):
         """Update account balance"""

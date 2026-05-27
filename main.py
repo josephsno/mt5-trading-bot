@@ -115,11 +115,11 @@ def main():
     while True:
         now = datetime.now()
 
-        if now.minute % TIMEFRAME_MINUTES != 0:
-            continue
+        # if now.minute % TIMEFRAME_MINUTES != 0:
+        #     continue
 
-        if last_run_minute == now.minute:
-            continue
+        # if last_run_minute == now.minute:
+        #     continue
 
         last_run_minute = now.minute
         print("\n" + "=" * 60)
