@@ -25,7 +25,7 @@ def reload_decouple():
 
 
 reload_decouple()
-live = True
+live = False
 if live:
     mt5_config = {
         "username": config("MT5_USERNAME"),
@@ -58,9 +58,8 @@ def main():
     # 1. INITIALIZE MT5
     # ============================================================
     mt5_config = MetaTraderConfig()
-    LIVE_MODE = True
 
-    def load_mt5_settings(live: bool) -> dict:
+    def load_mt5_settings() -> dict:
         reload_decouple()
         return {
             "username": config("MT5_USERNAME" if live else "MT5_USERNAME_TRIAL"),
@@ -69,9 +68,9 @@ def main():
             "mt5_pathway": config("MT5_PATHWAY"),
         }
 
-    mt5_settings = load_mt5_settings(LIVE_MODE)
+    mt5_settings = load_mt5_settings()
 
-    print(f"\n🎯 Trading Mode: {'LIVE' if LIVE_MODE else 'DEMO'}")
+    print(f"\n🎯 Trading Mode: {'LIVE' if live else 'DEMO'}")
 
     if not mt5_config.start_mt5(mt5_settings):
         print("❌ Failed to start MT5. Exiting...")
@@ -120,11 +119,11 @@ def main():
     while True:
         now = datetime.now()
 
-        # if now.minute % TIMEFRAME_MINUTES != 0:
-        #     continue
+        if now.minute % TIMEFRAME_MINUTES != 0:
+            continue
 
-        # if last_run_minute == now.minute:
-        #     continue
+        if last_run_minute == now.minute:
+            continue
 
         last_run_minute = now.minute
         print("\n" + "=" * 60)
