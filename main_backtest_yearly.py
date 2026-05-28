@@ -140,9 +140,9 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 
 
 symbols = [
-    # "GBPJPYm",  # 0.6p 0.4l
+    "GBPJPYm",  # 0.6p 0.4l
     # "EURJPYm",  # 0.8p 0.4l
-    "XAUUSDm"
+    # "XAUUSDm"
 ]
 
 data_provider = MT5DataProvider(mt5_config)
