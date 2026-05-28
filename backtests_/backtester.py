@@ -44,12 +44,12 @@ class Backtester:
         # self.strategy.min_ema_slope = 0.0008
 
         self.strategy = RSIFlexibleStrategy(
-            allowed_weekdays=[1, 2, 3],  # Monday-Friday trading
+            allowed_weekdays=[0,1, 2, 3,4],  # Monday-Friday trading
             backtest_mode=True,
             initial_balance=100,
             sl_pips=30,
             use_volume_filter=False,
-            min_ema_slope = 0.0005
+            min_ema_slope = 0.002
 
         )
 
