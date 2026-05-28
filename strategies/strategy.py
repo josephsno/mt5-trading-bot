@@ -64,7 +64,7 @@ class RSIFlexibleStrategy:
             "EURUSDm": {"p": 0.2, "l": 0.2},
             "GBPJPYm": {"p": 0.2, "l": 0.2},
             "EURJPYm": {"p": 0.2, "l": 0.2},
-            "CADJPYm": {"p": 0.2, "l": 0.2},
+            "XAUUSDm": {"p": 0.2, "l": 0.2},
       
 
         }
