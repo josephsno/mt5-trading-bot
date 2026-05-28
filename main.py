@@ -99,13 +99,10 @@ def main():
     # 3. TRADING PARAMETERS
     # ============================================================
     SYMBOLS = [
-        "EURUSDm",
+        "XAUUSDm",
         "GBPJPYm",
         "EURJPYm",
-        "USDJPYm",
-        "CADJPYm",
-        "AUDJPYm",
-        "SGDJPYm",
+      
     ]
     TIMEFRAME = mt5.TIMEFRAME_M15
     TIMEFRAME_MINUTES = 15
