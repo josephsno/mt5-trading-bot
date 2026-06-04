@@ -1,5 +1,5 @@
 import pandas as pd
-from strategies.strategy import RSIFlexibleStrategy,RSIFlexibleStrategy_MACDReversal
+from strategies.strategy import RSIFlexibleStrategy,RSIFlexibleStrategy_MACDReversal,RSIFlexibleStrategy_MACDReversal_Trial1
 import pytz
 
 
@@ -43,11 +43,12 @@ class Backtester:
         # )
         # self.strategy.min_ema_slope = 0.0008
 
-        self.strategy = RSIFlexibleStrategy_MACDReversal(
+        self.strategy = RSIFlexibleStrategy_MACDReversal_Trial1(
             allowed_weekdays=[0,1, 2, 3,4],  # Monday-Friday trading
             backtest_mode=True,
             initial_balance=100,
             sl_pips=30,
+            tp_pips=5,  # 2:1 R/R
             use_volume_filter=False,
             min_ema_slope = 0.002
 

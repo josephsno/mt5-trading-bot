@@ -101,7 +101,6 @@ def main():
         "XAUUSDm",
         "GBPJPYm",
         "EURJPYm",
-      
     ]
     TIMEFRAME = mt5.TIMEFRAME_M15
     TIMEFRAME_MINUTES = 15
