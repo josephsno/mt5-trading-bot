@@ -49,12 +49,12 @@ class Backtester:
         # )
         # self.strategy.min_ema_slope = 0.0008
 
-        self.strategy = RSIFlexibleStrategy_MACDReversal_Trial2(
-            allowed_weekdays=[0, 1, 2, 3, 4],  # Monday-Friday trading
+        self.strategy = RSIFlexibleStrategy_MACDReversal_Trial3(
+            allowed_weekdays=[1, 2, 3, 4],  # Monday-Friday trading
             backtest_mode=True,
             initial_balance=100,
-            sl_pips=60,
-            tp_pips=10,  # 2:1 R/R
+            sl_pips=20,
+            tp_pips=15,  # 2:1 R/R
             use_volume_filter=False,
         )
 

@@ -2294,11 +2294,12 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
         )
 
         self.balance_cap: dict = {
-            "EURUSDm": {"p": 0.1, "l": 0.2},
-            "GBPJPYm": {"p": 0.2, "l": 0.2},
-            "EURJPYm": {"p": 0.2, "l": 0.2},
-            "AUDUSDm": {"p": 0.2, "l": 0.2},
-            "GBPUSDm": {"p": 0.2, "l": 0.2},
+            "EURUSDm": {"p": 0.05, "l": 0.1},
+            "GBPJPYm": {"p": 0.05, "l": 0.1},
+            "EURJPYm": {"p": 0.05, "l": 0.1},
+            "AUDJPYm": {"p": 0.05, "l": 0.1},
+            "AUDUSDm": {"p": 0.05, "l": 0.1},
+            "GBPUSDm": {"p": 0.05, "l": 0.1},
         }
 
         # Volume
@@ -2531,7 +2532,7 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
 
     # ---------------- LOT SIZING ---------------- #
 
-    def _get_lot_size(self, symbol: str, capped: int = 3) -> float:
+    def _get_lot_size(self, symbol: str, capped: int = 2) -> float:
         capped_streak = min(self.winning_streak, capped)
 
         if self.backtest_mode:
