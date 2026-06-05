@@ -28,7 +28,7 @@ MT5_TIMEFRAME_MAP = {
     MetaTrader5.TIMEFRAME_MN1: "1 Month",
 }
 
-timeframe = MetaTrader5.TIMEFRAME_M15
+timeframe = MetaTrader5.TIMEFRAME_M30
 # higher_tf = MetaTrader5.TIMEFRAME_M30
 
 
@@ -142,8 +142,9 @@ def backtest_by_year_df(symbols, start_year, end_year, initial_balance=100):
 symbols = [
     # "GBPJPYm",  # 0.6p 0.4l
     # "EURJPYm",  # 0.8p 0.4l
-    # "XAUUSDm"
     "EURUSDm",
+    # "AUDUSDm",  # 0.8p 0.4l
+    # "GBPUSDm",  # 0.8p 0.4l
 ]
 
 data_provider = MT5DataProvider(mt5_config)

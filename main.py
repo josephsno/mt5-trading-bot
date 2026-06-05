@@ -1,7 +1,7 @@
 import MetaTrader5 as mt5
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
-from strategies.strategy import RSIFlexibleStrategy
+from strategies.strategy import RSIFlexibleStrategy, RSIFlexibleStrategy_MACDReversal
 from datetime import datetime, timedelta
 import os
 
@@ -84,12 +84,19 @@ def main():
     #     allowed_weekdays=[1, 2, 3],  # Tuesday-Thursday trading
     #     initial_balance=100,
     # )
-    strategy = RSIFlexibleStrategy(
+    # strategy = RSIFlexibleStrategy(
+    #     allowed_weekdays=[0, 1, 2, 3, 4],  # Monday-Friday trading
+    #     initial_balance=100,
+    #     sl_pips=30,
+    #     use_volume_filter=False,
+    #     min_ema_slope=0.002,
+    # )
+    strategy = RSIFlexibleStrategy_MACDReversal(
         allowed_weekdays=[0, 1, 2, 3, 4],  # Monday-Friday trading
         initial_balance=100,
-        sl_pips=30,
+        sl_pips=60,
+        tp_pips=10,  # 2:1 R/R
         use_volume_filter=False,
-        min_ema_slope=0.002,
     )
 
     print(f"\n🧠 Strategy Loaded: {strategy}")
@@ -98,12 +105,14 @@ def main():
     # 3. TRADING PARAMETERS
     # ============================================================
     SYMBOLS = [
-        "XAUUSDm",
         "GBPJPYm",
         "EURJPYm",
+        "AUDUSDm",
+        "EURUSDm",
+        "GBPUSDm",
     ]
-    TIMEFRAME = mt5.TIMEFRAME_M15
-    TIMEFRAME_MINUTES = 15
+    TIMEFRAME = mt5.TIMEFRAME_M30
+    TIMEFRAME_MINUTES = 30
     MAX_OPEN_TRADES = 1
 
     last_run_minute = None
