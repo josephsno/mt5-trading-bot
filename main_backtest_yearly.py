@@ -146,6 +146,8 @@ symbols = [
     # "EURUSDm",
     # "AUDUSDm",  # 0.8p 0.4l
     # "GBPUSDm",  # 0.8p 0.4l
+    # "XAUUSDm"
+    "USDJPYm"
 
 ]
 

@@ -1,7 +1,10 @@
 import MetaTrader5 as mt5
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
-from strategies.strategy import RSIFlexibleStrategy, RSIFlexibleStrategy_MACDReversal
+from strategies.strategy import (
+    RSIFlexibleStrategy,
+    RSIFlexibleStrategy_MACDReversal_Trial3,
+)
 from datetime import datetime, timedelta
 import os
 
@@ -91,10 +94,10 @@ def main():
     #     use_volume_filter=False,
     #     min_ema_slope=0.002,
     # )
-    strategy = RSIFlexibleStrategy_MACDReversal(
+    strategy = RSIFlexibleStrategy_MACDReversal_Trial3(
         allowed_weekdays=[0, 1, 2, 3, 4],  # Monday-Friday trading
         initial_balance=100,
-        sl_pips=60,
+        sl_pips=10,
         tp_pips=10,  # 2:1 R/R
         use_volume_filter=False,
     )
@@ -110,6 +113,8 @@ def main():
         "AUDUSDm",
         "EURUSDm",
         "GBPUSDm",
+        "AUDJPYm",
+        "USDJPYm",
     ]
     TIMEFRAME = mt5.TIMEFRAME_M30
     TIMEFRAME_MINUTES = 30

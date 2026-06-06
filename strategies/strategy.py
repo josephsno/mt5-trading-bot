@@ -2300,6 +2300,9 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
             "AUDJPYm": {"p": 0.05, "l": 0.1},
             "AUDUSDm": {"p": 0.05, "l": 0.1},
             "GBPUSDm": {"p": 0.05, "l": 0.1},
+            "USDJPYm": {"p": 0.05, "l": 0.1},
+
+
         }
 
         # Volume
