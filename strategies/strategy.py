@@ -2210,7 +2210,6 @@ class RSIFlexibleStrategy_MACDReversal_Trial2:
         )
 
 
-
 class RSIFlexibleStrategy_MACDReversal_Trial3:
     """
     Flexible RSI Strategy + MACD Reversal Filter — Trial 3
@@ -2301,8 +2300,6 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
             "AUDUSDm": {"p": 0.05, "l": 0.1},
             "GBPUSDm": {"p": 0.05, "l": 0.1},
             "USDJPYm": {"p": 0.05, "l": 0.1},
-
-
         }
 
         # Volume
@@ -2470,7 +2467,9 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
         histogram = macd_line - signal_line
         return macd_line, signal_line, histogram
 
-    def _get_prev_wave_stats(self, macd_hist: pd.Series, trend: str) -> tuple[int, float]:
+    def _get_prev_wave_stats(
+        self, macd_hist: pd.Series, trend: str
+    ) -> tuple[int, float]:
         """
         Walk backwards from iloc[-2] counting the previous completed wave.
 
@@ -2600,8 +2599,13 @@ class RSIFlexibleStrategy_MACDReversal_Trial3:
         # ---------- TIME FILTER ----------
         entry_time = self._get_entry_time(price_data)
         day_names = [
-            "Monday", "Tuesday", "Wednesday", "Thursday",
-            "Friday", "Saturday", "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
         ]
         weekday_num = int(pd.to_datetime(entry_time).weekday())
         day_name = day_names[weekday_num]
