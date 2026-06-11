@@ -53,8 +53,8 @@ class Backtester:
             allowed_weekdays=[1, 2, 3, 4],  # Monday-Friday trading
             backtest_mode=True,
             initial_balance=100,
-            sl_pips=20,
-            tp_pips=15,  # 2:1 R/R
+            sl_pips=15,
+            tp_pips=30,  # 2:1 R/R
             use_volume_filter=False,
         )
 
