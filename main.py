@@ -1,4 +1,3 @@
-import MetaTrader5 as mt5
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
 from strategies.claudestrategy import MonthlyTrendStrategy
@@ -9,12 +8,8 @@ import os
 
 def reload_decouple():
     KEYS = [
-        "MT5_USERNAME",
-        "MT5_PASSWORD",
-        "MT5_SERVER",
-        "MT5_USERNAME_TRIAL",
-        "MT5_PASSWORD_TRIAL",
-        "MT5_SERVER_TRIAL",
+        "MT5_USERNAME", "MT5_PASSWORD", "MT5_SERVER",
+        "MT5_USERNAME_TRIAL", "MT5_PASSWORD_TRIAL", "MT5_SERVER_TRIAL",
         "MT5_PATHWAY",
     ]
     for k in KEYS:
@@ -34,7 +29,7 @@ def sleep_until_next_15min():
 reload_decouple()
 
 LIVE = False
-SYMBOLS = ["EURUSDm"]
+SYMBOLS = ["EURUSDm", "USDJPYm"]
 
 
 def main():
@@ -42,9 +37,9 @@ def main():
     # ── MT5 ──────────────────────────────────────────────────────
     mt5_config = MetaTraderConfig()
     mt5_settings = {
-        "username": config("MT5_USERNAME" if LIVE else "MT5_USERNAME_TRIAL"),
-        "password": config("MT5_PASSWORD" if LIVE else "MT5_PASSWORD_TRIAL"),
-        "server": config("MT5_SERVER" if LIVE else "MT5_SERVER_TRIAL"),
+        "username":    config("MT5_USERNAME"      if LIVE else "MT5_USERNAME_TRIAL"),
+        "password":    config("MT5_PASSWORD"      if LIVE else "MT5_PASSWORD_TRIAL"),
+        "server":      config("MT5_SERVER"        if LIVE else "MT5_SERVER_TRIAL"),
         "mt5_pathway": config("MT5_PATHWAY"),
     }
 
@@ -100,13 +95,11 @@ def main():
             if not signal["signal"]:
                 continue
 
-            print(
-                f"   🎯 {signal['signal'].upper()} | "
-                f"Entry {signal['entry_price']} | "
-                f"SL {signal['stop_loss']} ({signal['sl_pips']}p) | "
-                f"TP {signal['take_profit']} ({signal['tp_pips']}p) | "
-                f"Lot {signal['lot_size']}"
-            )
+            print(f"   🎯 {signal['signal'].upper()} | "
+                  f"Entry {signal['entry_price']} | "
+                  f"SL {signal['stop_loss']} ({signal['sl_pips']}p) | "
+                  f"TP {signal['take_profit']} ({signal['tp_pips']}p) | "
+                  f"Lot {signal['lot_size']}")
 
             success = mt5_config.execute_trade(
                 symbol=symbol,

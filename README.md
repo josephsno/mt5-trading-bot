@@ -3,7 +3,7 @@
 A position trading strategy that uses the **monthly timeframe for directional bias**
 and **M15 bars for precise entry timing**.
 
-Derived from 18 months of backtested EURUSD M15 data on a real broker account.
+Derived from 18 months of backtested M15 data across EURUSDm and USDJPYm on Exness.
 Designed to run fully automated in **live MT5** with no manual intervention.
 
 ---
@@ -21,46 +21,57 @@ Risk–Reward is fixed at **1:3 minimum** with trailing after 2R.
 
 ---
 
-## 📊 Backtest Results (EURUSDm, Jan 2025 – Jun 2026)
+## 📊 Backtest Results (Exness spreads, Jan 2025 – Jun 2026)
 
-| Metric | Value |
-|--------|-------|
-| Win rate | 58.8% |
-| Net pips | +964p |
-| Avg per trade | +56.7p |
-| Total trades | 17 |
-| Monthly average | +57p |
+| Pair | Trades | Win rate | Net pips | Avg/trade | Entry days |
+|------|--------|----------|----------|-----------|------------|
+| EURUSDm | 20 | 45.0% | +1,078p | +53.9p | Mon + Tue |
+| USDJPYm | 28 | 43.0% | +843p | +30.1p | Wed + Thu |
+| **Combined** | **48** | | **+1,921p** | | |
 
 ---
 
-## 🕒 Entry Windows (UTC)
+## 🕒 Entry Windows
+
+### EURUSDm — Monday and Tuesday only
 
 | Window | UTC | WAT (UTC+1) |
 |--------|-----|-------------|
 | London open | 07:00–08:00 | 08:00–09:00 |
 | NY overlap | 13:00–14:00 | 14:00–15:00 |
 
-**Entry days: Monday and Tuesday only.**
+### USDJPYm — Wednesday and Thursday only
+
+| Window | UTC | WAT (UTC+1) |
+|--------|-----|-------------|
+| Tokyo open | 00:00–01:00 | 01:00–02:00 |
+| London open | 07:00–08:00 | 08:00–09:00 |
+| NY overlap | 13:00–14:00 | 14:00–15:00 |
 
 ---
 
 ## 🚫 No-Trade Rules
 
-- November and December — volatility too low
-- Wednesday, Thursday, Friday — no new entries
-- 21:00–23:00 UTC — spread too wide (18–29 pips)
+- November and December — volatility too low across all pairs
+- Outside the entry days above — no new entries
+- 21:00–23:00 UTC — spread too wide
+- Friday — no new entries, hard close any open trade at 14:00 UTC (15:00 WAT)
 - Weekends — never
 
 ---
 
-## ⚙️ Entry Logic (all must pass)
+## ⚙️ Entry Logic (all must pass in order)
 
-1. Prior month closed above its open → **BUY bias** | below → **SELL bias**
-2. Current week moving in same direction as monthly bias
-3. Current M15 bar closes in bias direction
-4. Candle body ≥ 50% of total range (momentum candle)
-5. Close above EMA50 for buys / below EMA50 for sells
-6. Structural SL (prior day low for buys, prior day high for sells) ≥ 35 pips away
+1. Symbol is in configured pair list (EURUSDm or USDJPYm)
+2. Current month is not November or December
+3. Current day is an allowed entry day for this symbol
+4. Current hour is in the allowed entry window for this symbol
+5. Prior month closed above its open → **BUY bias** | below → **SELL bias**
+6. Current week moving in same direction as monthly bias
+7. Current M15 bar closes in bias direction
+8. Candle body ≥ 50% of total range (momentum candle, not a wick spike)
+9. Close above EMA50 for buys / below EMA50 for sells
+10. Structural SL (prior day low for buys, prior day high for sells) ≥ 35 pips away
 
 ---
 
@@ -98,6 +109,29 @@ Default risk: **1% per trade**. One position per symbol at a time.
 | `trail_trigger_r` | 2.0 | R level that triggers breakeven |
 | `trail_pips` | 30.0 | Trail distance after breakeven |
 | `ema_period` | 50 | EMA for trend confirmation |
+
+---
+
+## ⚙️ Symbol Configuration
+
+```python
+SYMBOL_CONFIG = {
+    "EURUSDm": {
+        "pip":         0.0001,
+        "spread":      0.00008,           # 8 points (Exness)
+        "entry_days":  [0, 1],            # Mon, Tue
+        "entry_hours": [7, 8, 13, 14],    # London open + NY overlap
+        "sl_buffer":   0.0003,
+    },
+    "USDJPYm": {
+        "pip":         0.01,
+        "spread":      0.018,             # 18 points (Exness)
+        "entry_days":  [2, 3],            # Wed, Thu
+        "entry_hours": [0, 1, 7, 8, 13, 14],  # Tokyo + London + NY overlap
+        "sl_buffer":   0.03,
+    },
+}
+```
 
 ---
 
@@ -146,6 +180,8 @@ No external data needs to be passed. Pass only the symbol.
 
 - M15 continuation rate is 49.3% — a coin flip. No intraday scalp strategy works.
 - Average adverse excursion = 27.7 pips. Any SL under 35 pips gets eaten by noise.
-- Spread at best hours = 8.8 pips. Minimum 3:1 R:R required to overcome spread drag.
-- Only positive-EV approach across 14 tested strategies: monthly trend alignment.
-- Nov–Dec dead months. Mar, Apr, Jun strongest months (+420p, +505p, +439p).
+- Exness spreads are exceptional — EURUSDm 0.8p, USDJPYm 0.18p, vs 8.8p assumed initially.
+- Tight spread added 100+ pips to EURUSD net result vs earlier broker assumptions.
+- Tokyo open (00:00 UTC) on USDJPY Wed+Thu: 50% WR, +35.5p expectancy — strongest single window.
+- GBPUSD, EURJPY, CADJPY all tested negative — monthly bias WR too low on those pairs.
+- Nov–Dec dead months. Mar, Apr, Jun strongest months (+420p, +505p, +439p on EURUSD).

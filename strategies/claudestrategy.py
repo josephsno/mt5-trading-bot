@@ -5,7 +5,7 @@ Monthly Trend Position Strategy
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -15,19 +15,52 @@ except ImportError:
     mt5 = None
 
 
+# ---------------------------------------------------------------------------
+# Per-symbol configuration
+# ---------------------------------------------------------------------------
+
+SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
+    "EURUSDm": {
+        "pip":          0.0001,
+        "spread":       0.00008,   # 8 points
+        "entry_days":   [0, 1],    # Mon, Tue
+        "entry_hours":  [7, 8, 13, 14],  # London open + NY overlap
+        "sl_buffer":    0.0003,
+    },
+    "USDJPYm": {
+        "pip":          0.01,
+        "spread":       0.018,     # 18 points
+        "entry_days":   [2, 3],    # Wed, Thu
+        "entry_hours":  [0, 1, 7, 8, 13, 14],  # Tokyo open + London open + NY overlap
+        "sl_buffer":    0.03,
+    },
+}
+
+
 def _pip(symbol: str) -> float:
-    if "JPY" in symbol.upper():
-        return 0.01
-    if symbol.upper().startswith("XAU"):
-        return 0.1
-    return 0.0001
+    return SYMBOL_CONFIG.get(symbol, {}).get("pip", 0.0001)
+
+
+def _spread(symbol: str) -> float:
+    return SYMBOL_CONFIG.get(symbol, {}).get("spread", 0.0001)
+
+
+def _entry_days(symbol: str) -> List[int]:
+    return SYMBOL_CONFIG.get(symbol, {}).get("entry_days", [0, 1])
+
+
+def _entry_hours(symbol: str) -> List[int]:
+    return SYMBOL_CONFIG.get(symbol, {}).get("entry_hours", [7, 8, 13, 14])
+
+
+def _sl_buffer(symbol: str) -> float:
+    return SYMBOL_CONFIG.get(symbol, {}).get("sl_buffer", 0.0003)
 
 
 def _round_price(price: float, symbol: str) -> float:
-    if "JPY" in symbol.upper():
+    pip = _pip(symbol)
+    if pip == 0.01:
         return round(price, 3)
-    if symbol.upper().startswith("XAU"):
-        return round(price, 2)
     return round(price, 5)
 
 
@@ -68,10 +101,10 @@ class MonthlyTrendStrategy:
         df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
         return df
 
-    def _fetch_all(self, symbol: str) -> tuple:
+    def _fetch_all(self, symbol: str) -> Tuple:
         """Fetch all required timeframes for a symbol in one place."""
         m15     = self._fetch(symbol, mt5.TIMEFRAME_M15, 300)  # entry trigger + EMA50
-        daily   = self._fetch(symbol, mt5.TIMEFRAME_D1,  5)    # structural SL (prior day)
+        daily   = self._fetch(symbol, mt5.TIMEFRAME_D1,  5)    # structural SL
         weekly  = self._fetch(symbol, mt5.TIMEFRAME_W1,  3)    # weekly bias
         monthly = self._fetch(symbol, mt5.TIMEFRAME_MN1, 3)    # monthly bias
         return m15, daily, weekly, monthly
@@ -92,22 +125,12 @@ class MonthlyTrendStrategy:
     # ------------------------------------------------------------ bias
 
     def _monthly_bias(self, monthly: pd.DataFrame) -> Optional[str]:
-        """
-        Uses the dedicated monthly timeframe bars.
-        monthly.iloc[-1] = current incomplete month
-        monthly.iloc[-2] = last completed month
-        """
         if len(monthly) < 2:
             return None
         prior = monthly.iloc[-2]
         return "buy" if prior["close"] > prior["open"] else "sell"
 
     def _weekly_confirmed(self, weekly: pd.DataFrame, bias: str) -> bool:
-        """
-        Uses the dedicated weekly timeframe bars.
-        weekly.iloc[-1] = current incomplete week
-        weekly.iloc[-2] = last completed week
-        """
         if len(weekly) < 2:
             return False
         prior = weekly.iloc[-2]
@@ -115,12 +138,12 @@ class MonthlyTrendStrategy:
         return direction == bias
 
     def _structural_sl(self, bias: str, daily: pd.DataFrame, entry: float, symbol: str) -> Optional[float]:
-        """SL = prior day low (buy) or prior day high (sell)."""
         if len(daily) < 2:
             return None
         prior = daily.iloc[-2]
+        buf = _sl_buffer(symbol)
         pip = _pip(symbol)
-        sl = (prior["low"] - 3 * pip) if bias == "buy" else (prior["high"] + 3 * pip)
+        sl = (prior["low"] - buf) if bias == "buy" else (prior["high"] + buf)
         if abs(entry - sl) / pip < self.min_sl_pips:
             return None
         return _round_price(sl, symbol)
@@ -129,7 +152,9 @@ class MonthlyTrendStrategy:
 
     def generate_signal(self, symbol: str) -> Dict[str, Any]:
 
-        # fetch everything needed
+        if symbol not in SYMBOL_CONFIG:
+            return self._no(f"Symbol {symbol} not configured")
+
         try:
             m15, daily, weekly, monthly = self._fetch_all(symbol)
         except ValueError as e:
@@ -143,27 +168,27 @@ class MonthlyTrendStrategy:
             return self._no("No-trade month")
 
         # dead hours
-        if now.hour in (21, 22, 23):
+        if now.hour in (21, 22, 23) and now.hour not in _entry_hours(symbol):
             return self._no("Dead hour")
 
-        # entry days: Mon=0, Tue=1 only
-        if now.weekday() not in (0, 1):
-            return self._no(f"Not an entry day: {now.strftime('%A')}")
+        # entry days — per symbol
+        if now.weekday() not in _entry_days(symbol):
+            return self._no(f"Not an entry day for {symbol}: {now.strftime('%A')}")
 
-        # entry hours: 07–08 or 13–14 UTC
-        if now.hour not in (7, 8, 13, 14):
+        # entry hours — per symbol
+        if now.hour not in _entry_hours(symbol):
             return self._no(f"Outside entry window: {now.hour}:00 UTC")
 
-        # monthly bias from monthly bars
+        # monthly bias
         bias = self._monthly_bias(monthly)
         if bias is None:
             return self._no("Cannot determine monthly bias")
 
-        # weekly confirmation from weekly bars
+        # weekly confirmation
         if not self._weekly_confirmed(weekly, bias):
             return self._no(f"Weekly does not confirm monthly bias ({bias})")
 
-        # EMA50 on M15
+        # EMA50
         m15 = m15.copy()
         m15["ema50"] = m15["close"].ewm(span=self.ema_period, adjust=False).mean()
         close, open_ = bar["close"], bar["open"]
@@ -195,7 +220,7 @@ class MonthlyTrendStrategy:
             entry = tick.ask if bias == "buy" else tick.bid
         entry = _round_price(entry, symbol)
 
-        # structural SL from daily bars
+        # structural SL
         sl = self._structural_sl(bias, daily, entry, symbol)
         if sl is None:
             return self._no(f"Structural SL < {self.min_sl_pips} pips — skip")
@@ -208,7 +233,7 @@ class MonthlyTrendStrategy:
             symbol,
         )
 
-        # store state keyed by symbol
+        # store state
         self._trades[symbol] = {
             "bias":     bias,
             "entry":    entry,
@@ -283,7 +308,7 @@ class MonthlyTrendStrategy:
         """
         Call on every M15 bar close while a trade is open.
         Fetches price and time internally.
-        Closes or modifies the MT5 position directly.
+        Closes or modifies MT5 position directly.
 
         Priority:
           1. Friday 14:00 UTC → hard close
@@ -346,7 +371,7 @@ class MonthlyTrendStrategy:
         return "Holding"
 
     def clear_trade(self, symbol: str) -> None:
-        """Call when a trade closes for any reason — SL hit, TP hit, or Friday close."""
+        """Call when a trade closes for any reason."""
         self._trades.pop(symbol, None)
 
     # ---------------------------------------------------------------- util
@@ -369,3 +394,8 @@ class MonthlyTrendStrategy:
 if __name__ == "__main__":
     s = MonthlyTrendStrategy(backtest_mode=True)
     print(s)
+    print("\nConfigured symbols:")
+    for sym, cfg in SYMBOL_CONFIG.items():
+        days = {0:'Mon',1:'Tue',2:'Wed',3:'Thu',4:'Fri'}
+        day_names = [days[d] for d in cfg['entry_days']]
+        print(f"  {sym}: entry days={day_names}, pip={cfg['pip']}, spread={cfg['spread']}")

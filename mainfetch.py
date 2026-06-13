@@ -35,13 +35,8 @@ if not mt5.initialize(
 
 print("MT5 connected:", mt5.account_info().server)
 
-symbol = "EURUSDm"
-all_symbols = [s.name for s in mt5.symbols_get() if "EUR" in s.name]
+symbol = "CADJPYm"
 
-if symbol not in all_symbols:
-    print(f"'{symbol}' not found. Available EUR symbols: {all_symbols}")
-    mt5.shutdown()
-    exit()
 
 mt5.symbol_select(symbol, True)
 
