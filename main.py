@@ -1,3 +1,4 @@
+import MetaTrader5 as mt5
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
 from strategies.claudestrategy import MonthlyTrendStrategy
@@ -53,10 +54,8 @@ def main():
     strategy = MonthlyTrendStrategy(
         risk_pct=1.0,
         min_sl_pips=35.0,
-        tp_rr=3.0,
-        trail_trigger_r=2.0,
-        trail_pips=30.0,
-        ema_period=50,
+        trail_trigger_r=1.0,
+        trail_pips=20.0,
         backtest_mode=False,
         initial_balance=100.0,
     )
@@ -74,6 +73,11 @@ def main():
         for symbol in SYMBOLS:
             print(f"\n📊 {symbol}")
 
+            # reset monthly tracker at start of each new month
+            if now.day <= 2 and now.hour <= 1:
+                strategy.reset_month(symbol, now.month)
+
+
             open_trades = mt5_config.get_open_trades_count(symbol=symbol)
 
             # ── Manage open trade ─────────────────────────────
@@ -81,10 +85,19 @@ def main():
                 status = strategy.manage_open_trade(symbol)
                 print(f"   📌 {status}")
 
-                # SL or TP hit externally by MT5 — clear strategy state
+                # SL or TP hit externally by MT5 — record result and clear
                 if mt5_config.get_open_trades_count(symbol=symbol) == 0:
-                    strategy.clear_trade(symbol)
-                    print(f"   🏁 {symbol} trade closed by MT5")
+                    # determine win or loss from last closed deal
+                    deals = mt5.history_deals_get(
+                        int(__import__('time').time()) - 86400,
+                        int(__import__('time').time())
+                    ) or []
+                    sym_deals = [d for d in deals if d.symbol == symbol and d.entry == 1]
+                    was_win = sym_deals[-1].profit > 0 if sym_deals else False
+                    current_month = now.month
+                    strategy.record_result(symbol, was_win, current_month)
+                    print(f"   🏁 {symbol} closed | {'WIN ✅' if was_win else 'LOSS ❌'}")
+                    print(f"   📊 {strategy.get_performance_summary(symbol)}")
 
                 continue
 
@@ -113,6 +126,7 @@ def main():
             print("   ✅ Executed" if success else "   ❌ Failed")
 
         print("\n✅ Cycle done")
+
         sleep_until_next_15min()
 
 

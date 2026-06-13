@@ -1,27 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import MetaTrader5 as mt5
-from mt5.mt5_data_provider import MT5DataProvider
 from decouple import config
+import pandas as pd
 import os
-
-
-class DummyMT5Config:
-    def __init__(self, config_dict):
-        self.__dict__.update(config_dict)
-
-    def get_market_data_date_range(
-        self, symbol, timeframe, start_date, end_date=None, no_of_candles=None
-    ):
-        import pandas as pd
-
-        rates = mt5.copy_rates_range(symbol, timeframe, start_date, end_date)
-
-        if rates is None:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(rates)
-        df["time"] = pd.to_datetime(df["time"], unit="s")
-        return df
 
 
 if not mt5.initialize(
@@ -35,43 +16,62 @@ if not mt5.initialize(
 
 print("MT5 connected:", mt5.account_info().server)
 
-symbol = "CADJPYm"
+# ── Config ────────────────────────────────────────────────────────────────────
+SYMBOL    = "EURUSDm"
+TIMEFRAME = mt5.TIMEFRAME_M15
 
+# ── Select symbol ─────────────────────────────────────────────────────────────
+if not mt5.symbol_select(SYMBOL, True):
+    print(f"Failed to select {SYMBOL}:", mt5.last_error())
+    mt5.shutdown()
+    exit()
 
-mt5.symbol_select(symbol, True)
+# ── Check symbol info ─────────────────────────────────────────────────────────
+info = mt5.symbol_info(SYMBOL)
+if info is None:
+    print(f"Symbol {SYMBOL} not found on this broker")
+    mt5.shutdown()
+    exit()
 
-mt5_config = DummyMT5Config(
-    {
-        "username": config("MT5_USERNAME"),
-        "password": config("MT5_PASSWORD"),
-        "server": config("MT5_SERVER"),
-        "mt5_pathway": config("MT5_PATHWAY"),
-    }
-)
+print(f"Symbol OK: {SYMBOL}")
+print(f"Digits: {info.digits}")
 
-provider = MT5DataProvider(mt5_config)
+# ── Check what history is available ──────────────────────────────────────────
+# First try: just grab the last 50000 bars — simplest approach
+print("\nFetching last 50000 bars...")
+rates = mt5.copy_rates_from_pos(SYMBOL, TIMEFRAME, 0, 50000)
 
-start_date = datetime(2025, 1, 1)
-end_date   = datetime(2026, 6, 11)
+if rates is None or len(rates) == 0:
+    print("copy_rates_from_pos failed:", mt5.last_error())
 
-eurusd_data = provider.fetch_data(
-    symbol=symbol,
-    timeframe=mt5.TIMEFRAME_M15,
-    start_date=start_date,
-    end_date=end_date,
-)
+    # Second try: use copy_rates_range with smaller range
+    print("\nTrying copy_rates_range with 2025 only...")
+    START = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    END   = datetime(2026, 6, 11, tzinfo=timezone.utc)
+    rates = mt5.copy_rates_range(SYMBOL, TIMEFRAME, START, END)
 
-print(f"Fetched {len(eurusd_data)} bars")
-print(eurusd_data.head())
+    if rates is None or len(rates) == 0:
+        print("copy_rates_range also failed:", mt5.last_error())
+        mt5.shutdown()
+        exit()
+
+df = pd.DataFrame(rates)
+df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+
+print(f"\nFetched {len(df)} bars")
+print(f"Range: {df['time'].iloc[0]} → {df['time'].iloc[-1]}")
+print(df.head())
 
 # ── Save ──────────────────────────────────────────────────────────────────────
 save_dir = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(save_dir, exist_ok=True)
 
-filename = f"{symbol}_M15_2025_2026.csv"
-save_path = os.path.join(save_dir, filename)
+start_year = df['time'].iloc[0].year
+end_year   = df['time'].iloc[-1].year
+filename   = f"{SYMBOL}_M15_{start_year}_{end_year}.csv"
+save_path  = os.path.join(save_dir, filename)
 
-eurusd_data.to_csv(save_path, index=False)
-print(f"Saved → {save_path}")
+df.to_csv(save_path, index=False)
+print(f"\nSaved → {save_path}")
 
 mt5.shutdown()
