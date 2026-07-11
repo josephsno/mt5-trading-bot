@@ -1,6 +1,5 @@
 import pandas as pd
 import MetaTrader5
-from datetime import datetime, timedelta
 
 class MT5DataProvider:
     """
