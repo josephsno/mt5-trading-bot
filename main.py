@@ -28,7 +28,7 @@ def sleep_until_next_15min():
 
 reload_decouple()
 
-LIVE    = False
+LIVE    = True
 SYMBOLS = ["EURUSDm", "USDJPYm"]
 
 

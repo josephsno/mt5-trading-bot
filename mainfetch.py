@@ -17,8 +17,10 @@ if not mt5.initialize(
 print("MT5 connected:", mt5.account_info().server)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SYMBOL    = "USDCADm"
-TIMEFRAME = mt5.TIMEFRAME_MN1  
+SYMBOL    = "EURUSDm"
+TIMEFRAME = mt5.TIMEFRAME_M15
+
+t = "15m"
 
 # ── Select symbol ─────────────────────────────────────────────────────────────
 if not mt5.symbol_select(SYMBOL, True):
@@ -68,7 +70,7 @@ os.makedirs(save_dir, exist_ok=True)
 
 start_year = df['time'].iloc[0].year
 end_year   = df['time'].iloc[-1].year
-filename   = f"{SYMBOL}_M15_{start_year}_{end_year}.csv"
+filename   = f"{SYMBOL}_{t}_{start_year}_{end_year}.csv"
 save_path  = os.path.join(save_dir, filename)
 
 df.to_csv(save_path, index=False)
