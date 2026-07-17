@@ -15,8 +15,20 @@ Every symbol follows the identical structure — only the numbers differ:
 4. Stop-loss is fixed at `sl` from entry. No fixed take-profit.
 5. Once price moves `be_trigger` in favor, stop moves to breakeven.
 6. From there, stop trails `trail` behind the best price reached.
-7. **Hard 24-hour max hold** — if still open 24h after fill, close at market
-   regardless of state. Matches the backtest's 96-M15-bar cap exactly.
+7. **Adaptive max-hold deadline** — every position is force-closed 1 hour
+   before its *own* symbol's next scheduled trigger time, whichever that
+   turns out to be for that specific trade. This replaced an earlier flat
+   24-hour cap: the flat version let a still-open trade silently block the
+   next day's entry (the bot would just skip placing a new straddle that
+   day) — 6.2% of the time on EURUSD, 3.2% on GBPUSD, 0.4% on USDJPY. The
+   original backtest never modeled this skip behavior at all. Backtesting
+   the adaptive rule directly showed it fixes the skip problem completely
+   (every symbol back to its full original trade count) and *improved*
+   3 of 4 symbols outright — GBPUSD nearly doubled (625p → 1,173p), USDJPY
+   improved (2,285p → 2,823p), only EURUSD dipped slightly (702p → 567p).
+   A trade that fills right at the trigger hour gets ~23 hours of runway;
+   one that fills near the cancel deadline gets much less, because it
+   specifically needs to be clear before tomorrow's entry.
 8. Position size: 1% of current balance ÷ (SL × pip value), floored at the
    broker's 0.01 lot minimum.
 
@@ -51,7 +63,7 @@ session's real order flow and Eurozone data (mostly 07:00-10:00 UTC)
 before the window fades.
 
 **Backtest (Jun 2024 - Jun 2026, real Exness spread, $90 start, 1% risk):**
-- 503 trades, 53.1% win rate, +82.9% return
+- 503 trades, 51.1% win rate, 567 pips, $146.67 final (adaptive deadline applied)
 - Mean R:R 1.06:1 (median win 19.1p vs fixed 25p risk) — edge comes from
   win rate, not payoff asymmetry, padded by a thin tail of 50-150+ pip
   trend trades
@@ -80,7 +92,7 @@ agreement across two unrelated pairs is the core evidence the London-open
 timing effect is structural, not curve-fit.
 
 **Backtest (same window/costs as above):**
-- 513 trades, 54.2% win rate, +169.7% return
+- 513 trades, 54.0% win rate, 2823 pips, $278.22 final (adaptive deadline applied)
 - Best-performing of the three FX pairs; fattest average edge (+4.45p vs
   EUR's +1.48p) — plausibly reflects JPY's typically larger absolute pip
   ranges relative to a fixed 25-pip stop, not necessarily a "better" edge
@@ -111,7 +123,9 @@ and catches the retest/reversal instead. This was verified against actual
 UK data release times, not just inferred from the backtest numbers.
 
 **Backtest (same window/costs as above):**
-- 504 trades, 50.8% win rate, +69.4% return
+- 504 trades, 51.0% win rate, 1173 pips, $207.26 final (adaptive deadline applied —
+  nearly doubled the flat-24h-cap result of 625 pips, since GBPUSD was the pair
+  most hurt by the old rule's silent day-skipping)
 - Fast-stop (whipsaw) rate at 04:00 UTC: 6.2%, rising to 16.0% by 12:00
   UTC — direct evidence of entry quality degrading as the day moves past
   the UK catalyst window
@@ -145,7 +159,8 @@ GBPUSD's (not independently verified against a specific catalyst calendar
 the way UK data releases were).
 
 **Backtest (May 2024 - Jun 2026):**
-- 473 trades, 60.3% win rate, at 240-point fixed spread, $90 start
+- 473 trades, 60.0% win rate, $2460.45 final, at 240-point fixed spread,
+  $90 start, adaptive deadline applied
 - **Out-of-sample check passed:** win rate improved train (56.4%) → test
   (64.1%), and held up after normalizing for gold's price roughly doubling
   over the window (year-by-year % return: 2024 +0.125%, 2025 +0.068%,
@@ -173,12 +188,12 @@ stop-loss.**
 
 ## Summary table
 
-| Symbol | Hour (UTC) | Win rate | Return | Risk/trade at $90 | Confidence |
+| Symbol | Hour (UTC) | Win rate | Result ($90 start) | Risk/trade at $90 | Confidence |
 |---|---|---|---|---|---|
-| EURUSDm | 08:00 | 53.1% | +82.9% | ~2.8% (lot floor) | High |
-| USDJPYm | 08:00 | 54.2% | +169.7% | ~2.5% (lot floor) | High |
-| GBPUSDm | 04:00 | 50.8% | +69.4% | ~2.8% (lot floor) | Moderate |
-| XAUUSDm | 01:00 | 60.3% | n/a (sizing-limited) | **~22% (lot floor)** | Signal: high / Sizing: unsafe |
+| EURUSDm | 08:00 | 51.1% | $146.67 | ~2.8% (lot floor) | High |
+| USDJPYm | 08:00 | 54.0% | $278.22 | ~2.5% (lot floor) | High |
+| GBPUSDm | 04:00 | 51.0% | $207.26 | ~2.8% (lot floor) | Moderate |
+| XAUUSDm | 01:00 | 60.0% | $2460.45 | **~22% (lot floor)** | Signal: high / Sizing: unsafe |
 
 ## Portfolio-level notes
 

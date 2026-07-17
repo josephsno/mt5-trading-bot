@@ -10,13 +10,18 @@ Entry  : Buy-stop + sell-stop straddle at each symbol's trigger hour.
          Whichever fills first is the trade; the other is cancelled (OCO).
 SL     : Fixed distance from entry (25 pips FX / $20 XAU).
 Exit   : Trail from 1R, 20 pips (FX) / $15 (XAU) per bar — no fixed TP,
-         EXCEPT a hard 24-hour max hold: if a position is still open 24h
-         after fill (96 M15 bars, matching the backtest exactly), it is
-         closed at market regardless of state. Some trades never reach
-         breakeven or the stop within a day and just drift near entry —
-         without this rule they'd sit open indefinitely. For trades
-         already past breakeven when the clock runs out, this locks in
-         whatever profit is on the table rather than cutting a loss.
+         EXCEPT an adaptive max-hold rule: every position is force-closed
+         1 hour before its OWN symbol's NEXT scheduled trigger time,
+         whichever that turns out to be. This replaced an earlier flat
+         24-hour cap after backtesting showed the flat version let a
+         still-open trade silently block the next day's entry ~0.4-6.2%
+         of the time depending on symbol (worst on EURUSD, 6.2%) — the
+         new bot would just skip placing a new straddle that day, which
+         the original backtest never modeled. The adaptive version
+         guarantees the symbol is always clear in time for its next
+         entry, and backtesting it directly improved 3 of 4 symbols
+         (GBPUSD nearly doubled: 625p -> 1,173p) while only slightly
+         reducing EURUSD (702p -> 567p).
 Breaker: Cross-pair — pauses ALL new entries if 2+ symbols each show 2+
          consecutive losses. A per-pair breaker was tested and made
          results worse (cuts a pair off right before its own recovery);
@@ -34,14 +39,16 @@ since streaks are recomputed from real deal history on every call, and the
 breaker has a hard max-pause fallback below, it cannot get stuck open
 forever the way an in-memory-only version can.
 
-Backtest summary (2024-2026, Exness M15 data, $90 start, 1% risk/trade):
-  EURUSDm @ 08:00 UTC : 503 trades, 53.1% win rate, +82.9% return
-  USDJPYm @ 08:00 UTC : 513 trades, 54.2% win rate, +169.7% return
-  GBPUSDm @ 04:00 UTC : 504 trades, 50.8% win rate, +69.4% return
+Backtest summary (2024-2026, Exness M15 data, $90 start, 1% risk/trade,
+adaptive per-symbol deadline applied — no silently skipped days):
+  EURUSDm @ 08:00 UTC : 503 trades, 51.1% win rate, 567 pips, $146.67 final
+  USDJPYm @ 08:00 UTC : 513 trades, 54.0% win rate, 2823 pips, $278.22 final
+  GBPUSDm @ 04:00 UTC : 504 trades, 51.0% win rate, 1173 pips, $207.26 final
     (08:00 UTC — which works for EUR/JPY — LOSES money on GBPUSD; UK data
     releases at 06:00-07:00 UTC, so 04:00 sits ahead of the catalyst while
     08:00 catches the retest/reversal instead of the move itself)
-  XAUUSDm @ 01:00 UTC : 473 trades, 60.3% win rate — parked, see GOLD_ENABLED
+  XAUUSDm @ 01:00 UTC : 473 trades, 60.0% win rate, $2460.45 final — parked
+    by default, see GOLD_ENABLED (enabled here at explicit user instruction)
 """
 
 from __future__ import annotations
@@ -106,7 +113,8 @@ GOLD_MIN_BALANCE = 2000.0
 
 MAGIC = 20260716  # unique to this strategy, keeps it from colliding with the M15 bot
 
-MAX_HOLD_HOURS = 24  # matches the backtest's 96-M15-bar cap exactly
+DEADLINE_BUFFER_HOURS = 1  # how far ahead of the NEXT trigger hour a trade
+                            # must be closed by — see _next_trigger_deadline()
 
 # Cross-pair circuit breaker
 BREAKER_LOSS_STREAK = 2
@@ -409,6 +417,23 @@ class StraddleStrategy:
             return max(bar["high"] for bar in bars)
         return min(bar["low"] for bar in bars)
 
+    def _next_trigger_deadline(self, symbol: str, fill_time: datetime.datetime) -> datetime.datetime:
+        """1 hour before the NEXT occurrence of this symbol's own trigger
+        hour after `fill_time`. Fully deterministic from fill_time and
+        SYMBOL_CONFIG — no MT5 call needed, no state stored.
+
+        This is per-symbol and per-trade: GBPUSDm (trigger 04:00) and
+        EURUSDm (trigger 08:00) get completely independent deadlines, and
+        two EURUSDm trades that filled at different times of day get
+        different deadlines too — a trade that fills right at 08:00 gets
+        almost a full day; one that fills at 15:45 gets far less, because
+        it needs to be clear well before tomorrow's 08:00 entry attempt.
+        """
+        trigger_hour = SYMBOL_CONFIG[symbol]["trigger_hour"]
+        today_trigger = fill_time.replace(hour=trigger_hour, minute=0, second=0, microsecond=0)
+        next_trigger = today_trigger + datetime.timedelta(days=1) if today_trigger <= fill_time else today_trigger
+        return next_trigger - datetime.timedelta(hours=DEADLINE_BUFFER_HOURS)
+
     def _close_position_at_market(self, symbol: str, position) -> bool:
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
@@ -423,7 +448,7 @@ class StraddleStrategy:
             "price":        tick.bid if is_buy else tick.ask,
             "deviation":    10,
             "magic":        MAGIC,
-            "comment":      "straddle_24h_timeout",
+            "comment":      "straddle_deadline_close",
             "type_time":    mt5.ORDER_TIME_GTC,
             "type_filling": mt5.ORDER_FILLING_IOC,
         })
@@ -440,11 +465,13 @@ class StraddleStrategy:
         plain breakeven+trail version, on every pair tested.
 
         Priority:
-          0. Position open >= MAX_HOLD_HOURS → close at market, no exception.
-             Matches the backtest's 96-bar cap exactly — some trades never
-             reach breakeven or the stop and just drift; without this they
-             would sit open indefinitely. For trades already past breakeven,
-             this locks in the current profit rather than cutting a loss.
+          0. Past this trade's adaptive deadline (1h before this symbol's
+             next trigger) → close at market, no exception. Guarantees the
+             symbol is always clear for its next entry — see
+             _next_trigger_deadline() and the module docstring for why
+             this replaced a flat 24h cap. For trades already past
+             breakeven when the deadline hits, this locks in the current
+             profit rather than cutting a loss.
           1. Price reaches be_trigger → move SL to breakeven
           2. After BE                 → trail SL tracking best price
         """
@@ -453,10 +480,10 @@ class StraddleStrategy:
             return "No open trade"
 
         entry_time = datetime.datetime.utcfromtimestamp(pos.time)
-        age = datetime.datetime.utcnow() - entry_time
-        if age >= datetime.timedelta(hours=MAX_HOLD_HOURS):
+        deadline = self._next_trigger_deadline(symbol, entry_time)
+        if datetime.datetime.utcnow() >= deadline:
             ok = self._close_position_at_market(symbol, pos)
-            return "24h max hold — closed at market" if ok else "24h timeout close FAILED"
+            return "Past adaptive deadline — closed at market" if ok else "Deadline close FAILED"
 
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
@@ -549,7 +576,8 @@ class StraddleStrategy:
             f"StraddleStrategy("
             f"risk={self.risk_pct}%, symbols={self.traded_symbols}, "
             f"breaker={BREAKER_MIN_SYMBOLS_FLAGGED}x{BREAKER_LOSS_STREAK}L, "
-            f"max_hold={MAX_HOLD_HOURS}h, stateless=True)"
+            f"adaptive_deadline=-{DEADLINE_BUFFER_HOURS}h_before_next_trigger, "
+            f"stateless=True)"
         )
 
 

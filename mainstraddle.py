@@ -9,8 +9,12 @@ import os
 
 def reload_decouple():
     KEYS = [
-        "MT5_USERNAME", "MT5_PASSWORD", "MT5_SERVER",
-        "MT5_USERNAME_TRIAL", "MT5_PASSWORD_TRIAL", "MT5_SERVER_TRIAL",
+        "MT5_USERNAME",
+        "MT5_PASSWORD",
+        "MT5_SERVER",
+        "MT5_USERNAME_TRIAL",
+        "MT5_PASSWORD_TRIAL",
+        "MT5_SERVER_TRIAL",
         "MT5_PATHWAY",
     ]
     for k in KEYS:
@@ -39,9 +43,9 @@ def main():
     # ── MT5 ──────────────────────────────────────────────────────────────
     mt5_config = MetaTraderConfig()
     mt5_settings = {
-        "username":    config("MT5_USERNAME"      if LIVE else "MT5_USERNAME_TRIAL"),
-        "password":    config("MT5_PASSWORD"      if LIVE else "MT5_PASSWORD_TRIAL"),
-        "server":      config("MT5_SERVER"        if LIVE else "MT5_SERVER_TRIAL"),
+        "username": config("MT5_USERNAME" if LIVE else "MT5_USERNAME_TRIAL"),
+        "password": config("MT5_PASSWORD" if LIVE else "MT5_PASSWORD_TRIAL"),
+        "server": config("MT5_SERVER" if LIVE else "MT5_SERVER_TRIAL"),
         "mt5_pathway": config("MT5_PATHWAY"),
     }
 
@@ -82,17 +86,19 @@ def main():
                 print(f"   {status}")
 
                 # detect the trade closing this cycle (SL, trail, or the
-                # 24h timeout) — read the outcome straight from MT5 history
+                # adaptive deadline) — read the outcome straight from MT5 history
                 # rather than tracking it ourselves
                 if mt5_config.get_open_trades_count(symbol=symbol) == 0:
-                    deals = mt5.history_deals_get(
-                        int(time.time()) - 86400,
-                        int(time.time())
-                    ) or []
+                    deals = (
+                        mt5.history_deals_get(
+                            int(time.time()) - 86400, int(time.time())
+                        )
+                        or []
+                    )
                     own_deals = [
-                        d for d in deals
-                        if d.symbol == symbol
-                        and d.entry == mt5.DEAL_ENTRY_OUT
+                        d
+                        for d in deals
+                        if d.symbol == symbol and d.entry == mt5.DEAL_ENTRY_OUT
                     ]
                     was_win = own_deals[-1].profit > 0 if own_deals else False
                     print(f"   {'WIN' if was_win else 'LOSS'}")
