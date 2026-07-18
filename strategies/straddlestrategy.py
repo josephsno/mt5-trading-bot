@@ -187,6 +187,37 @@ class StraddleStrategy:
 
     # ---------------------------------------------------------------- MT5 reads
 
+    def _filling_mode(self, symbol: str) -> int:
+        """Different brokers/symbols support different fill modes — hardcoding
+        ORDER_FILLING_IOC everywhere was wrong and is exactly what caused the
+        None-return crash on XAUUSDm. Ask MT5 what this symbol actually
+        supports and pick accordingly, every call, no caching."""
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            return mt5.ORDER_FILLING_IOC  # best-effort fallback, shouldn't happen
+        mode = info.filling_mode
+        if mode & mt5.SYMBOL_FILLING_IOC:
+            return mt5.ORDER_FILLING_IOC
+        if mode & mt5.SYMBOL_FILLING_FOK:
+            return mt5.ORDER_FILLING_FOK
+        return mt5.ORDER_FILLING_RETURN
+
+    def _safe_order_send(self, request: Dict[str, Any]):
+        """mt5.order_send() returns None — not a result object — when the
+        request never reaches the trade server at all: AutoTrading disabled
+        in the terminal, the symbol not in Market Watch, an unsupported
+        filling mode, or a dropped connection. Every direct order_send call
+        in this file used to skip checking for that and crashed trying to
+        read .retcode off None. This wrapper is the only place that talks
+        to order_send from here on — logs the real reason via
+        mt5.last_error() and returns None cleanly instead of crashing."""
+        result = mt5.order_send(request)
+        if result is None:
+            print(f"  order_send returned None — request never reached the "
+                  f"server. mt5.last_error(): {mt5.last_error()}")
+            return None
+        return result
+
     def _get_position(self, symbol: str):
         """Fetch this strategy's open position for `symbol` directly from
         MT5, or None. No caching — call fresh every time.
@@ -309,6 +340,16 @@ class StraddleStrategy:
         if tick is None:
             return self._no("No tick data")
 
+        # Market-closed guard: a genuinely stale tick (no new price in the
+        # last few minutes) is the most reliable sign from this API that
+        # the symbol isn't actively trading right now — e.g. XAUUSDm before
+        # its Sunday 22:05 GMT weekly open, or during a daily break window.
+        # Catching this here gives a clear "market closed" message instead
+        # of order_send returning None with no explanation.
+        tick_age = datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(tick.time)
+        if tick_age > datetime.timedelta(minutes=10):
+            return self._no(f"Market likely closed — last tick is {tick_age} old")
+
         # Mid price as anchor for both sides, matching the backtest's
         # bar-open reference rather than bid/ask (which would bias one side).
         anchor = (tick.bid + tick.ask) / 2.0
@@ -323,13 +364,14 @@ class StraddleStrategy:
 
         lots = self._lot_size(symbol, anchor, cfg["sl"])
         expiration = self._cancel_deadline(cfg["cancel_hour"])
+        filling_mode = self._filling_mode(symbol)
 
         tickets: Dict[str, Optional[int]] = {"buy": None, "sell": None}
         for side, order_type, price, stop in (
             ("buy", mt5.ORDER_TYPE_BUY_STOP, buy_stop, buy_sl),
             ("sell", mt5.ORDER_TYPE_SELL_STOP, sell_stop, sell_sl),
         ):
-            result = mt5.order_send({
+            result = self._safe_order_send({
                 "action":       mt5.TRADE_ACTION_PENDING,
                 "symbol":       symbol,
                 "volume":       lots,
@@ -341,18 +383,18 @@ class StraddleStrategy:
                 "comment":      "straddle_entry",
                 "type_time":    mt5.ORDER_TIME_SPECIFIED,
                 "expiration":   expiration,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": filling_mode,
             })
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
+            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
                 tickets[side] = result.order
 
         if tickets["buy"] is None or tickets["sell"] is None:
             # partial failure — clean up whichever side DID go through so we
             # don't leave a naked one-sided pending order
             if tickets["buy"] is not None:
-                mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["buy"]})
+                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["buy"]})
             if tickets["sell"] is not None:
-                mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["sell"]})
+                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["sell"]})
             return self._no(f"Order send failed — buy={tickets['buy']} sell={tickets['sell']}, rolled back")
 
         return {
@@ -391,14 +433,14 @@ class StraddleStrategy:
         if pos is not None:
             leftover = pending["sell"] if pos.type == mt5.ORDER_TYPE_BUY else pending["buy"]
             if leftover is not None:
-                mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": leftover.ticket})
+                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": leftover.ticket})
             bias = "buy" if pos.type == mt5.ORDER_TYPE_BUY else "sell"
             return f"{bias.upper()} filled — opposite order cancelled"
 
         now_ts = datetime.datetime.utcnow().timestamp()
         for order in (pending["buy"], pending["sell"]):
             if order is not None and order.time_expiration and now_ts >= order.time_expiration:
-                mt5.order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket})
+                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket})
         remaining = self._get_pending_orders(symbol)
         if remaining["buy"] is None and remaining["sell"] is None:
             return "Neither side filled — straddle cancelled"
@@ -439,7 +481,7 @@ class StraddleStrategy:
         if tick is None:
             return False
         is_buy = position.type == mt5.POSITION_TYPE_BUY
-        result = mt5.order_send({
+        result = self._safe_order_send({
             "action":       mt5.TRADE_ACTION_DEAL,
             "symbol":       symbol,
             "volume":       position.volume,
@@ -450,9 +492,9 @@ class StraddleStrategy:
             "magic":        MAGIC,
             "comment":      "straddle_deadline_close",
             "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
+            "type_filling": self._filling_mode(symbol),
         })
-        return result.retcode == mt5.TRADE_RETCODE_DONE
+        return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
     def manage_open_trade(self, symbol: str) -> str:
         """
@@ -526,14 +568,14 @@ class StraddleStrategy:
         return "Holding"
 
     def _modify_sl(self, symbol: str, pos, new_sl: float) -> bool:
-        result = mt5.order_send({
+        result = self._safe_order_send({
             "action":   mt5.TRADE_ACTION_SLTP,
             "symbol":   symbol,
             "position": pos.ticket,
             "sl":       new_sl,
             "tp":       pos.tp,
         })
-        return result.retcode == mt5.TRADE_RETCODE_DONE
+        return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
     # ---------------------------------------------------------------- reporting
 
