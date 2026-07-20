@@ -11,17 +11,18 @@ Entry  : Buy-stop + sell-stop straddle at each symbol's trigger hour.
 SL     : Fixed distance from entry (25 pips FX / $20 XAU).
 Exit   : Trail from 1R, 20 pips (FX) / $15 (XAU) per bar — no fixed TP,
          EXCEPT an adaptive max-hold rule: every position is force-closed
-         1 hour before its OWN symbol's NEXT scheduled trigger time,
-         whichever that turns out to be. This replaced an earlier flat
-         24-hour cap after backtesting showed the flat version let a
-         still-open trade silently block the next day's entry ~0.4-6.2%
-         of the time depending on symbol (worst on EURUSD, 6.2%) — the
-         new bot would just skip placing a new straddle that day, which
-         the original backtest never modeled. The adaptive version
-         guarantees the symbol is always clear in time for its next
-         entry, and backtesting it directly improved 3 of 4 symbols
-         (GBPUSD nearly doubled: 625p -> 1,173p) while only slightly
-         reducing EURUSD (702p -> 567p).
+         1 hour before its OWN symbol's NEXT scheduled trigger time — capped
+         so it can NEVER bridge the weekend. A Friday fill always closes by
+         20:00 UTC that same Friday, regardless of how early it filled,
+         rather than riding through to Monday's trigger and taking on
+         weekend gap risk (mirrors the monthly bot's own Friday hard-close
+         rule). This replaced an earlier flat 24-hour cap after backtesting
+         showed the flat version let a still-open trade silently block the
+         next day's entry ~0.4-6.2% of the time depending on symbol (worst
+         on EURUSD, 6.2%) — the bot would just skip placing a new straddle
+         that day, which the original backtest never modeled. The adaptive
+         version fixes the skip problem completely and improved 3 of 4
+         symbols outright — GBPUSD nearly doubled: 625p -> 1,173p.
 Breaker: Cross-pair — pauses ALL new entries if 2+ symbols each show 2+
          consecutive losses. A per-pair breaker was tested and made
          results worse (cuts a pair off right before its own recovery);
@@ -58,47 +59,50 @@ from typing import Any, Dict, List, Optional
 
 import MetaTrader5 as mt5
 
-
 # ---------------------------------------------------------------------------
 # Per-symbol configuration
 # ---------------------------------------------------------------------------
 
 SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
     "EURUSDm": {
-        "pip":          0.0001,
-        "offset":       15,
-        "sl":           25,
-        "trail":        20,
-        "be_trigger":   25,
+        "pip": 0.0001,
+        "offset": 15,
+        "sl": 25,
+        "trail": 20,
+        "be_trigger": 25,
         "trigger_hour": 8,
-        "cancel_hour":  16,
+        "trigger_minute": 0,  # e.g. set to 30 to test 08:30 instead of 08:00
+        "cancel_hour": 16,
     },
     "USDJPYm": {
-        "pip":          0.01,
-        "offset":       15,
-        "sl":           25,
-        "trail":        20,
-        "be_trigger":   25,
+        "pip": 0.01,
+        "offset": 15,
+        "sl": 25,
+        "trail": 20,
+        "be_trigger": 25,
         "trigger_hour": 8,
-        "cancel_hour":  16,
+        "trigger_minute": 0,
+        "cancel_hour": 16,
     },
     "GBPUSDm": {
-        "pip":          0.0001,
-        "offset":       15,
-        "sl":           25,
-        "trail":        20,
-        "be_trigger":   25,
-        "trigger_hour": 4,   # NOT 08:00 — see module docstring, do not "fix" this
-        "cancel_hour":  12,
+        "pip": 0.0001,
+        "offset": 15,
+        "sl": 25,
+        "trail": 20,
+        "be_trigger": 25,
+        "trigger_hour": 4,  # NOT 08:00 — see module docstring, do not "fix" this
+        "trigger_minute": 0,
+        "cancel_hour": 12,
     },
     "XAUUSDm": {
-        "pip":          1.0,   # working directly in USD, not pips, for gold
-        "offset":       10,
-        "sl":           20,
-        "trail":        15,
-        "be_trigger":   20,
+        "pip": 1.0,  # working directly in USD, not pips, for gold
+        "offset": 10,
+        "sl": 20,
+        "trail": 15,
+        "be_trigger": 20,
         "trigger_hour": 1,
-        "cancel_hour":  9,
+        "trigger_minute": 0,
+        "cancel_hour": 9,
     },
 }
 
@@ -114,13 +118,16 @@ GOLD_MIN_BALANCE = 2000.0
 MAGIC = 20260716  # unique to this strategy, keeps it from colliding with the M15 bot
 
 DEADLINE_BUFFER_HOURS = 1  # how far ahead of the NEXT trigger hour a trade
-                            # must be closed by — see _next_trigger_deadline()
+# must be closed by — see _next_trigger_deadline()
+WEEKLY_CLOSE_HOUR = 20  # UTC, Friday — hard cap so no position ever rides
+# through the weekend gap. Mirrors the existing
+# monthly bot's own Friday hard-close rule.
 
 # Cross-pair circuit breaker
 BREAKER_LOSS_STREAK = 2
 BREAKER_MIN_SYMBOLS_FLAGGED = 2
 BREAKER_MAX_PAUSE_HOURS = 96  # hard fallback: never pause longer than this,
-                               # regardless of streak state — see _is_paused()
+# regardless of streak state — see _is_paused()
 
 
 def _pip(symbol: str) -> float:
@@ -150,6 +157,7 @@ def _round_price(price: float, symbol: str) -> float:
 # Strategy
 # ---------------------------------------------------------------------------
 
+
 class StraddleStrategy:
     """No __init__ state beyond configuration — see module docstring.
     Every method queries MT5 fresh; nothing is cached between calls."""
@@ -166,8 +174,7 @@ class StraddleStrategy:
         self.lot_step = lot_step
         self.starting_balance = initial_balance
         self.traded_symbols: List[str] = [
-            s for s in SYMBOL_CONFIG
-            if s != "XAUUSDm" or GOLD_ENABLED
+            s for s in SYMBOL_CONFIG if s != "XAUUSDm" or GOLD_ENABLED
         ]
 
     # ---------------------------------------------------------------- balance
@@ -190,15 +197,26 @@ class StraddleStrategy:
     def _filling_mode(self, symbol: str) -> int:
         """Different brokers/symbols support different fill modes — hardcoding
         ORDER_FILLING_IOC everywhere was wrong and is exactly what caused the
-        None-return crash on XAUUSDm. Ask MT5 what this symbol actually
-        supports and pick accordingly, every call, no caching."""
+        None-return crash on XAUUSDm previously. Ask MT5 what this symbol
+        actually supports and pick accordingly, every call, no caching.
+
+        symbol_info().filling_mode is a bitmask: bit 1 (value 1) = FOK
+        supported, bit 2 (value 2) = IOC supported, both bits set = both
+        supported. These are documented on the MQL5 side as SYMBOL_FILLING_FOK
+        and SYMBOL_FILLING_IOC, but the Python MetaTrader5 package does NOT
+        expose those as module attributes — only the ORDER_FILLING_* request
+        constants exist in mt5.*. Referencing mt5.SYMBOL_FILLING_IOC crashed
+        with AttributeError; the raw integers below are the correct fix,
+        not a workaround."""
         info = mt5.symbol_info(symbol)
         if info is None:
             return mt5.ORDER_FILLING_IOC  # best-effort fallback, shouldn't happen
         mode = info.filling_mode
-        if mode & mt5.SYMBOL_FILLING_IOC:
+        SYMBOL_FILLING_FOK = 1
+        SYMBOL_FILLING_IOC = 2
+        if mode & SYMBOL_FILLING_IOC:
             return mt5.ORDER_FILLING_IOC
-        if mode & mt5.SYMBOL_FILLING_FOK:
+        if mode & SYMBOL_FILLING_FOK:
             return mt5.ORDER_FILLING_FOK
         return mt5.ORDER_FILLING_RETURN
 
@@ -213,8 +231,10 @@ class StraddleStrategy:
         mt5.last_error() and returns None cleanly instead of crashing."""
         result = mt5.order_send(request)
         if result is None:
-            print(f"  order_send returned None — request never reached the "
-                  f"server. mt5.last_error(): {mt5.last_error()}")
+            print(
+                f"  order_send returned None — request never reached the "
+                f"server. mt5.last_error(): {mt5.last_error()}"
+            )
             return None
         return result
 
@@ -258,13 +278,18 @@ class StraddleStrategy:
         deal backwards, reading MT5 history directly. Returns
         (streak, time_of_most_recent_loss_or_None) — the timestamp feeds the
         breaker's max-pause fallback below."""
-        since = datetime.datetime.utcnow() - datetime.timedelta(days=lookback_days)
-        deals = mt5.history_deals_get(since, datetime.datetime.utcnow(), group=f"*{symbol}*")
+        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            days=lookback_days
+        )
+        deals = mt5.history_deals_get(
+            since, datetime.datetime.now(datetime.timezone.utc), group=f"*{symbol}*"
+        )
         if not deals:
             return 0, None
         closes = sorted(
             [d for d in deals if d.magic == MAGIC and d.entry == mt5.DEAL_ENTRY_OUT],
-            key=lambda d: d.time, reverse=True,
+            key=lambda d: d.time,
+            reverse=True,
         )
         streak = 0
         most_recent_loss_time = None
@@ -302,7 +327,10 @@ class StraddleStrategy:
 
         most_recent_flag = max(flagged_times)
         age_hours = (
-            datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(most_recent_flag)
+            datetime.datetime.now(datetime.timezone.utc)
+            - datetime.datetime.fromtimestamp(
+                most_recent_flag, tz=datetime.timezone.utc
+            )
         ).total_seconds() / 3600.0
         if age_hours > BREAKER_MAX_PAUSE_HOURS:
             return False  # fallback expired — do not stay paused forever
@@ -332,8 +360,10 @@ class StraddleStrategy:
             return self._no("Cross-pair circuit breaker active — no new entries")
 
         cfg = SYMBOL_CONFIG[symbol]
-        now = datetime.datetime.utcnow()
-        if now.hour != cfg["trigger_hour"] or now.minute != 0:
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if now.hour != cfg["trigger_hour"] or now.minute != cfg.get(
+            "trigger_minute", 0
+        ):
             return self._no(f"Outside trigger window: {now.hour}:{now.minute:02d} UTC")
 
         tick = mt5.symbol_info_tick(symbol)
@@ -346,7 +376,9 @@ class StraddleStrategy:
         # its Sunday 22:05 GMT weekly open, or during a daily break window.
         # Catching this here gives a clear "market closed" message instead
         # of order_send returning None with no explanation.
-        tick_age = datetime.datetime.utcnow() - datetime.datetime.utcfromtimestamp(tick.time)
+        tick_age = datetime.datetime.now(
+            datetime.timezone.utc
+        ) - datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
         if tick_age > datetime.timedelta(minutes=10):
             return self._no(f"Market likely closed — last tick is {tick_age} old")
 
@@ -371,43 +403,64 @@ class StraddleStrategy:
             ("buy", mt5.ORDER_TYPE_BUY_STOP, buy_stop, buy_sl),
             ("sell", mt5.ORDER_TYPE_SELL_STOP, sell_stop, sell_sl),
         ):
-            result = self._safe_order_send({
-                "action":       mt5.TRADE_ACTION_PENDING,
-                "symbol":       symbol,
-                "volume":       lots,
-                "type":         order_type,
-                "price":        price,
-                "sl":           stop,
-                "tp":           0.0,   # no fixed TP — trail manages the exit
-                "magic":        MAGIC,
-                "comment":      "straddle_entry",
-                "type_time":    mt5.ORDER_TIME_SPECIFIED,
-                "expiration":   expiration,
-                "type_filling": filling_mode,
-            })
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            result = self._safe_order_send(
+                {
+                    "action": mt5.TRADE_ACTION_PENDING,
+                    "symbol": symbol,
+                    "volume": lots,
+                    "type": order_type,
+                    "price": price,
+                    "sl": stop,
+                    "tp": 0.0,  # no fixed TP — trail manages the exit
+                    "magic": MAGIC,
+                    "comment": "straddle_entry",
+                    "type_time": mt5.ORDER_TIME_SPECIFIED,
+                    "expiration": int(expiration.timestamp()),
+                    "type_filling": filling_mode,
+                }
+            )
+            if result is None:
+                continue  # _safe_order_send already logged mt5.last_error() for this case
+            if result.retcode == mt5.TRADE_RETCODE_DONE:
                 tickets[side] = result.order
+            else:
+                # THIS is the previously-silent case: MT5 responded, but
+                # rejected the order (bad stops distance, no money, requote,
+                # market closed for this order type, etc.). result.retcode
+                # and result.comment carry the real broker-side reason —
+                # log both instead of just leaving tickets[side] as None
+                # with no explanation.
+                print(
+                    f"  {side.upper()} {symbol} rejected — retcode={result.retcode} "
+                    f"comment='{result.comment}' request_id={result.request_id}"
+                )
 
         if tickets["buy"] is None or tickets["sell"] is None:
             # partial failure — clean up whichever side DID go through so we
             # don't leave a naked one-sided pending order
             if tickets["buy"] is not None:
-                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["buy"]})
+                self._safe_order_send(
+                    {"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["buy"]}
+                )
             if tickets["sell"] is not None:
-                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["sell"]})
-            return self._no(f"Order send failed — buy={tickets['buy']} sell={tickets['sell']}, rolled back")
+                self._safe_order_send(
+                    {"action": mt5.TRADE_ACTION_REMOVE, "order": tickets["sell"]}
+                )
+            return self._no(
+                f"Order send failed — buy={tickets['buy']} sell={tickets['sell']}, rolled back"
+            )
 
         return {
-            "signal":    "straddle",
-            "buy_stop":  buy_stop,
+            "signal": "straddle",
+            "buy_stop": buy_stop,
             "sell_stop": sell_stop,
-            "lot_size":  lots,
+            "lot_size": lots,
             "cancel_at": expiration.isoformat(),
-            "reason":    f"Straddle placed | buy={buy_stop} sell={sell_stop} | lots={lots}",
+            "reason": f"Straddle placed | buy={buy_stop} sell={sell_stop} | lots={lots}",
         }
 
     def _cancel_deadline(self, cancel_hour: int) -> datetime.datetime:
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(datetime.timezone.utc)
         deadline = now.replace(hour=cancel_hour, minute=0, second=0, microsecond=0)
         if deadline <= now:
             deadline += datetime.timedelta(days=1)
@@ -431,16 +484,26 @@ class StraddleStrategy:
 
         pos = self._get_position(symbol)
         if pos is not None:
-            leftover = pending["sell"] if pos.type == mt5.ORDER_TYPE_BUY else pending["buy"]
+            leftover = (
+                pending["sell"] if pos.type == mt5.ORDER_TYPE_BUY else pending["buy"]
+            )
             if leftover is not None:
-                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": leftover.ticket})
+                self._safe_order_send(
+                    {"action": mt5.TRADE_ACTION_REMOVE, "order": leftover.ticket}
+                )
             bias = "buy" if pos.type == mt5.ORDER_TYPE_BUY else "sell"
             return f"{bias.upper()} filled — opposite order cancelled"
 
-        now_ts = datetime.datetime.utcnow().timestamp()
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
         for order in (pending["buy"], pending["sell"]):
-            if order is not None and order.time_expiration and now_ts >= order.time_expiration:
-                self._safe_order_send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket})
+            if (
+                order is not None
+                and order.time_expiration
+                and now_ts >= order.time_expiration
+            ):
+                self._safe_order_send(
+                    {"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket}
+                )
         remaining = self._get_pending_orders(symbol)
         if remaining["buy"] is None and remaining["sell"] is None:
             return "Neither side filled — straddle cancelled"
@@ -451,49 +514,88 @@ class StraddleStrategy:
     def _best_price_since_entry(self, symbol: str, position) -> float:
         """No best-price is stored anywhere — re-derive it from actual M15
         history between the position's open time and now, every call."""
-        entry_time = datetime.datetime.utcfromtimestamp(position.time)
-        bars = mt5.copy_rates_range(symbol, mt5.TIMEFRAME_M15, entry_time, datetime.datetime.utcnow())
+        entry_time = datetime.datetime.fromtimestamp(
+            position.time, tz=datetime.timezone.utc
+        )
+        bars = mt5.copy_rates_range(
+            symbol,
+            mt5.TIMEFRAME_M15,
+            entry_time,
+            datetime.datetime.now(datetime.timezone.utc),
+        )
         if bars is None or len(bars) == 0:
             return position.price_open
         if position.type == mt5.POSITION_TYPE_BUY:
             return max(bar["high"] for bar in bars)
         return min(bar["low"] for bar in bars)
 
-    def _next_trigger_deadline(self, symbol: str, fill_time: datetime.datetime) -> datetime.datetime:
+    def _next_trigger_deadline(
+        self, symbol: str, fill_time: datetime.datetime
+    ) -> datetime.datetime:
         """1 hour before the NEXT occurrence of this symbol's own trigger
-        hour after `fill_time`. Fully deterministic from fill_time and
-        SYMBOL_CONFIG — no MT5 call needed, no state stored.
+        hour after `fill_time` — capped so it can never land on or after
+        Saturday. Fully deterministic from fill_time and SYMBOL_CONFIG —
+        no MT5 call needed, no state stored.
 
-        This is per-symbol and per-trade: GBPUSDm (trigger 04:00) and
-        EURUSDm (trigger 08:00) get completely independent deadlines, and
-        two EURUSDm trades that filled at different times of day get
-        different deadlines too — a trade that fills right at 08:00 gets
-        almost a full day; one that fills at 15:45 gets far less, because
-        it needs to be clear well before tomorrow's 08:00 entry attempt.
+        Without the cap, a naive version of this would push a Friday fill's
+        deadline all the way to Monday's trigger, letting the position ride
+        through the entire weekend and take on gap risk — exactly what the
+        monthly bot's Friday hard-close rule exists to avoid. So instead:
+        whatever the normal next-trigger math computes, if it would land on
+        Saturday/Sunday, the deadline is capped at this week's Friday
+        WEEKLY_CLOSE_HOUR instead. A Friday fill gets compressed into
+        however many hours remain before that cutoff, however early or
+        late in the day it filled — it never gets the usual ~23h runway.
         """
         trigger_hour = SYMBOL_CONFIG[symbol]["trigger_hour"]
-        today_trigger = fill_time.replace(hour=trigger_hour, minute=0, second=0, microsecond=0)
-        next_trigger = today_trigger + datetime.timedelta(days=1) if today_trigger <= fill_time else today_trigger
-        return next_trigger - datetime.timedelta(hours=DEADLINE_BUFFER_HOURS)
+        trigger_minute = SYMBOL_CONFIG[symbol].get("trigger_minute", 0)
+        today_trigger = fill_time.replace(
+            hour=trigger_hour, minute=trigger_minute, second=0, microsecond=0
+        )
+        next_trigger = (
+            today_trigger + datetime.timedelta(days=1)
+            if today_trigger <= fill_time
+            else today_trigger
+        )
+        deadline = next_trigger - datetime.timedelta(hours=DEADLINE_BUFFER_HOURS)
+
+        days_until_friday = (4 - fill_time.weekday()) % 7  # Monday=0 ... Friday=4
+        friday_close = (fill_time + datetime.timedelta(days=days_until_friday)).replace(
+            hour=WEEKLY_CLOSE_HOUR, minute=0, second=0, microsecond=0
+        )
+        if (
+            friday_close < fill_time
+        ):  # shouldn't happen given trigger hours are all < 20, but guard anyway
+            friday_close += datetime.timedelta(days=7)
+
+        if deadline.weekday() >= 5 or deadline > friday_close:
+            return friday_close
+        return deadline
 
     def _close_position_at_market(self, symbol: str, position) -> bool:
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
             return False
         is_buy = position.type == mt5.POSITION_TYPE_BUY
-        result = self._safe_order_send({
-            "action":       mt5.TRADE_ACTION_DEAL,
-            "symbol":       symbol,
-            "volume":       position.volume,
-            "type":         mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-            "position":     position.ticket,
-            "price":        tick.bid if is_buy else tick.ask,
-            "deviation":    10,
-            "magic":        MAGIC,
-            "comment":      "straddle_deadline_close",
-            "type_time":    mt5.ORDER_TIME_GTC,
-            "type_filling": self._filling_mode(symbol),
-        })
+        result = self._safe_order_send(
+            {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "symbol": symbol,
+                "volume": position.volume,
+                "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+                "position": position.ticket,
+                "price": tick.bid if is_buy else tick.ask,
+                "deviation": 10,
+                "magic": MAGIC,
+                "comment": "straddle_deadline_close",
+                "type_time": mt5.ORDER_TIME_GTC,
+                "type_filling": self._filling_mode(symbol),
+            }
+        )
+        if result is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(
+                f"  Close {symbol} rejected — retcode={result.retcode} comment='{result.comment}'"
+            )
         return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
     def manage_open_trade(self, symbol: str) -> str:
@@ -521,11 +623,15 @@ class StraddleStrategy:
         if pos is None:
             return "No open trade"
 
-        entry_time = datetime.datetime.utcfromtimestamp(pos.time)
+        entry_time = datetime.datetime.fromtimestamp(pos.time, tz=datetime.timezone.utc)
         deadline = self._next_trigger_deadline(symbol, entry_time)
-        if datetime.datetime.utcnow() >= deadline:
+        if datetime.datetime.now(datetime.timezone.utc) >= deadline:
             ok = self._close_position_at_market(symbol, pos)
-            return "Past adaptive deadline — closed at market" if ok else "Deadline close FAILED"
+            return (
+                "Past adaptive deadline — closed at market"
+                if ok
+                else "Deadline close FAILED"
+            )
 
         tick = mt5.symbol_info_tick(symbol)
         if tick is None:
@@ -568,28 +674,47 @@ class StraddleStrategy:
         return "Holding"
 
     def _modify_sl(self, symbol: str, pos, new_sl: float) -> bool:
-        result = self._safe_order_send({
-            "action":   mt5.TRADE_ACTION_SLTP,
-            "symbol":   symbol,
-            "position": pos.ticket,
-            "sl":       new_sl,
-            "tp":       pos.tp,
-        })
+        result = self._safe_order_send(
+            {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": symbol,
+                "position": pos.ticket,
+                "sl": new_sl,
+                "tp": pos.tp,
+            }
+        )
+        if result is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(
+                f"  SL modify {symbol} rejected — retcode={result.retcode} comment='{result.comment}'"
+            )
         return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
     # ---------------------------------------------------------------- reporting
 
-    def get_performance_summary(self, symbol: Optional[str] = None, lookback_days: int = 90) -> Dict[str, Any]:
+    def get_performance_summary(
+        self, symbol: Optional[str] = None, lookback_days: int = 90
+    ) -> Dict[str, Any]:
         """Reads win rate and streak status straight from MT5 deal history —
         nothing tracked separately, so this is always consistent with what
         actually happened on the account, including trades placed manually
         or by a previous, now-dead process."""
         symbols = [symbol] if symbol else self.traded_symbols
-        since = datetime.datetime.utcnow() - datetime.timedelta(days=lookback_days)
+        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            days=lookback_days
+        )
         all_closes = []
         for sym in symbols:
-            deals = mt5.history_deals_get(since, datetime.datetime.utcnow(), group=f"*{sym}*") or ()
-            all_closes.extend(d for d in deals if d.magic == MAGIC and d.entry == mt5.DEAL_ENTRY_OUT)
+            deals = (
+                mt5.history_deals_get(
+                    since,
+                    datetime.datetime.now(datetime.timezone.utc),
+                    group=f"*{sym}*",
+                )
+                or ()
+            )
+            all_closes.extend(
+                d for d in deals if d.magic == MAGIC and d.entry == mt5.DEAL_ENTRY_OUT
+            )
 
         if not all_closes:
             return {"trades": 0, "status": "No trades yet"}
@@ -597,8 +722,8 @@ class StraddleStrategy:
         wins = sum(1 for d in all_closes if d.profit > 0)
         summary: Dict[str, Any] = {
             "total_trades": len(all_closes),
-            "win_rate":     f"{wins/len(all_closes)*100:.1f}%",
-            "status":       "PAUSED (circuit breaker)" if self._is_paused() else "ACTIVE",
+            "win_rate": f"{wins/len(all_closes)*100:.1f}%",
+            "status": "PAUSED (circuit breaker)" if self._is_paused() else "ACTIVE",
         }
         if symbol:
             streak, _ = self._consecutive_losses(symbol)
@@ -609,8 +734,12 @@ class StraddleStrategy:
 
     def _no(self, reason: str) -> Dict[str, Any]:
         return {
-            "signal": None, "buy_stop": None, "sell_stop": None,
-            "lot_size": None, "cancel_at": None, "reason": reason,
+            "signal": None,
+            "buy_stop": None,
+            "sell_stop": None,
+            "lot_size": None,
+            "cancel_at": None,
+            "reason": reason,
         }
 
     def __repr__(self) -> str:
@@ -629,6 +758,8 @@ if __name__ == "__main__":
     print()
     for sym, cfg in SYMBOL_CONFIG.items():
         enabled = sym in s.traded_symbols
-        print(f"  {sym}: trigger={cfg['trigger_hour']}:00 UTC  "
-              f"cancel={cfg['cancel_hour']}:00 UTC  "
-              f"{'ENABLED' if enabled else 'disabled (GOLD_ENABLED=False)'}")
+        print(
+            f"  {sym}: trigger={cfg['trigger_hour']}:00 UTC  "
+            f"cancel={cfg['cancel_hour']}:00 UTC  "
+            f"{'ENABLED' if enabled else 'disabled (GOLD_ENABLED=False)'}"
+        )
