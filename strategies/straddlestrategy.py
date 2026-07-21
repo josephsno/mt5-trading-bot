@@ -50,6 +50,22 @@ adaptive per-symbol deadline applied — no silently skipped days):
     08:00 catches the retest/reversal instead of the move itself)
   XAUUSDm @ 01:00 UTC : 473 trades, 60.0% win rate, $2460.45 final — parked
     by default, see GOLD_ENABLED (enabled here at explicit user instruction)
+
+CHANGE LOG (this revision):
+  - Added _get_tick(symbol): every tick read in this file now goes through
+    this one helper, which calls mt5.symbol_select(symbol, True) before
+    mt5.symbol_info_tick(symbol). Root cause of the 2026-07-21 GBPUSDm
+    04:00 miss: symbol_info_tick() returns None for any symbol not
+    currently in the terminal's Market Watch list — it does NOT auto-add
+    it. EUR/JPY/gold happened to already be watched, GBPUSDm wasn't, so
+    check_and_place() silently returned "No tick data" and no straddle
+    was placed. symbol_select() is the same action as right-clicking a
+    symbol and choosing "Show Symbol" in the terminal, done in code, on
+    every call, so the bot never again depends on Market Watch already
+    being set up correctly. Applied consistently to all three places that
+    used to call mt5.symbol_info_tick() directly (check_and_place,
+    _close_position_at_market, manage_open_trade) rather than only
+    patching the one that broke.
 """
 
 from __future__ import annotations
@@ -193,6 +209,26 @@ class StraddleStrategy:
         return max(self.min_lot, round(lot / self.lot_step) * self.lot_step)
 
     # ---------------------------------------------------------------- MT5 reads
+
+    def _get_tick(self, symbol: str):
+        """Single choke point for reading live tick data. mt5.symbol_info_tick()
+        returns None for any symbol not currently in the terminal's Market
+        Watch list — it does NOT add it for you. Root cause of the
+        2026-07-21 GBPUSDm 04:00 miss: GBPUSDm wasn't in Market Watch on the
+        VPS terminal at that moment, so this returned None and the straddle
+        was silently skipped, even though the market was open.
+
+        mt5.symbol_select(symbol, True) is the same action as right-clicking
+        the symbol and choosing "Show Symbol" in the terminal UI — calling
+        it here, every time, before reading the tick, means the bot no
+        longer depends on Market Watch already being set up correctly and
+        self-heals if a symbol ever drops out of it again (VPS restart,
+        terminal reinstall, etc.)."""
+        tick = mt5.symbol_info_tick(symbol)
+        if tick is None:
+            mt5.symbol_select(symbol, True)
+            tick = mt5.symbol_info_tick(symbol)
+        return tick
 
     def _filling_mode(self, symbol: str) -> int:
         """Different brokers/symbols support different fill modes — hardcoding
@@ -366,7 +402,7 @@ class StraddleStrategy:
         ):
             return self._no(f"Outside trigger window: {now.hour}:{now.minute:02d} UTC")
 
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self._get_tick(symbol)
         if tick is None:
             return self._no("No tick data")
 
@@ -573,7 +609,7 @@ class StraddleStrategy:
         return deadline
 
     def _close_position_at_market(self, symbol: str, position) -> bool:
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self._get_tick(symbol)
         if tick is None:
             return False
         is_buy = position.type == mt5.POSITION_TYPE_BUY
@@ -633,7 +669,7 @@ class StraddleStrategy:
                 else "Deadline close FAILED"
             )
 
-        tick = mt5.symbol_info_tick(symbol)
+        tick = self._get_tick(symbol)
         if tick is None:
             return "No tick data"
 
