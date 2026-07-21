@@ -17,7 +17,7 @@ if not mt5.initialize(
 print("MT5 connected:", mt5.account_info().server)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SYMBOL    = "EURUSDm"
+SYMBOL    = "BTCUSDm"
 TIMEFRAME = mt5.TIMEFRAME_M15
 
 t = "15m"
