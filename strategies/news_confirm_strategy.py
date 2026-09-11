@@ -27,26 +27,35 @@ SL     : Real per-symbol stop — can still trigger before the 1-minute
          mark if price moves against it fast enough. NOTE: real Sept 4
          2026 tick-level analysis (see 2026-09-08 CHANGE LOG) confirmed
          this SL is a price level, not a payment cap — a fast cascade
-         can jump straight through it. Sizing is set conservatively
-         (7% flat, see below) partly to keep that tail survivable, not
-         because the SL itself got tighter.
+         can jump straight through it (measured ~$40 worst-case range
+         on gold in the 300ms after one real trigger, against a nominal
+         $7 SL). Sizing is now 2% — see 2026-09-11 CHANGE LOG — after a
+         same-day sequence that briefly passed through 33.2143% before
+         landing here. At 2%, and at this project's documented balance
+         range, sizing is back near where it started the day (was 7%),
+         though still not independently re-validated at this exact
+         level.
 Exit   : Hard 1-minute force-close, no TP, no reload. Whichever comes
          first — the SL hitting, or 60 seconds elapsing — ends the
          trade. Exit deviation is now effectively uncapped (see
          2026-09-08 CHANGE LOG) so this close cannot get rejected and
          silently retried through a volatile window.
-Sizing : Flat 7% risk per symbol (see 2026-09-08 CHANGE LOG), computed
-         once at entry — no reload here to grow it further.
+Sizing : 2% risk on XAUUSDm (see 2026-09-11 CHANGE LOG) — the final
+         value of a same-day sequence (7.0% -> 3.0% -> 33.2143% ->
+         2.0%). At this project's documented balance range ($90-373),
+         2% lands on the same 0.01 lot floor as several other
+         percentages already tested that day. Computed once at entry —
+         no reload here to grow it further.
 Filter : NONE. See prior revision's docstring — the FOMC-proximity
          filter was tested and removed for THIS mechanic specifically
          (helped the reload chain, hurt the spike mechanic). Not
          re-litigated here.
 
 Entry window : Every date in the three schedule constants below is
-         stored 5 SECONDS EARLY relative to the real, source-verified
+         stored 3 SECONDS EARLY relative to the real, source-verified
          release time (e.g. real NFP release 12:30:00 UTC is stored as
-         12:29:55). This is deliberate, not a mistake — see CHANGE LOG.
-         The entry window itself is only the 5 seconds before the real
+         12:29:57). This is deliberate, not a mistake — see CHANGE LOG.
+         The entry window itself is only the seconds before the real
          release — `_next_event_trigger_window()` opens at the stored
          (early) time and closes hard AT the real release. If a
          straddle has not been placed by the real release moment, that
@@ -54,11 +63,7 @@ Entry window : Every date in the three schedule constants below is
          already moved. The point of the spike edge is catching the
          FIRST move; chasing it after release defeats the purpose and
          re-exposes the entry to the same price/stops_level rejection
-         risk this change exists to avoid. (Considered narrowing to 3s
-         on 2026-09-08 — explicitly rejected: doesn't reduce slippage,
-         the mechanism that matters happens post-trigger not
-         post-placement, and a narrower window only raises the odds a
-         poll cycle steps over it entirely. Left at 5s.)
+         risk this change exists to avoid.
 
 *** VALIDATED EVIDENCE — XAUUSDm ONLY ***
 XAUUSDm is backed by real, minute-level, control-tested backtest data
@@ -68,22 +73,78 @@ time controls). A single real tick-level event (Sept 4 2026 NFP) was
 also walked through in detail — see 2026-09-08 CHANGE LOG — and
 confirmed the mechanic can survive a violent, discontinuous cascade
 when direction cooperates; it does NOT establish the SL reliably caps
-loss when direction doesn't cooperate. Still a single event.
+loss when direction doesn't cooperate. Still a single event. Sizing
+has moved several times today (7% -> 3% -> 33.2143% -> 2%, see CHANGE
+LOG) — the validated evidence hasn't changed through any of that,
+worth remembering regardless of which risk_pct is live.
 
-*** XAGUSDm — STRUCTURAL, NOT VALIDATED ***
-XAGUSDm's offset/SL are uncalibrated guesses scaled roughly off gold's
-by relative price level — no backtest, no random-time control, no
-year-over-year check. One real tick-level walkthrough exists (Sept 4
-2026 NFP, see CHANGE LOG) and it was a clean win, but the dollar figure
-from that walkthrough leaned on an ASSUMED contract size (5000oz) that
-was never confirmed against this account's real
-`symbol_info("XAGUSDm").trade_contract_size` — treat that P&L number
-as directionally right, not precisely right, until confirmed live.
+*** XAGUSDm REMOVED 2026-09-11 *** — see CHANGE LOG. Only XAUUSDm is
+traded by this file now.
 
-*** COPPER (XCUUSDm) REMOVED 2026-09-08 *** — see CHANGE LOG. Only
-XAUUSDm and XAGUSDm are traded by this file now.
+*** COPPER (XCUUSDm) REMOVED 2026-09-08 *** — see CHANGE LOG.
 
-*** STILL DEMO ONLY (all symbols) ***
+*** STILL DEMO ONLY ***
+
+CHANGE LOG (2026-09-11, schedule fixes):
+  - FIXED FOMC_SCHEDULE_UTC: every literal was stored as XX:00:57, which
+    is 57 SECONDS AFTER the real 2:00 PM ET release (18:00:00 / 19:00:00
+    UTC), not 3 seconds before it as intended. This meant every FOMC
+    entry window as previously written would have opened nearly a full
+    minute after the real release and closed moments later — the bot
+    would have tried to place a straddle on an already-stale anchor
+    price, deep into the exact "don't chase a move that's already
+    happened" scenario this file's own design exists to avoid. Corrected
+    to XX:59:57 (17:59:57 / 18:59:57) to match the same 3s-early pattern
+    already correct on NFP_SCHEDULE_UTC/CPI_SCHEDULE_UTC. NFP and CPI
+    literals were checked against the same logic and found correct — this
+    bug was isolated to FOMC. All FOMC dates (2026 and 2027) independently
+    re-verified against the Federal Reserve's own published calendar —
+    dates themselves were correct, only the time-of-day literal was wrong.
+  - Removed the stale 2026-09-09 NFP test entry (past).
+  - Moved a misfiled entry from NFP_SCHEDULE_UTC to CPI_SCHEDULE_UTC and
+    corrected its time: it was stored as an NFP date on 2026-09-11 at
+    14:29:57, which matches neither a real NFP date nor the correct CPI
+    time. BLS confirms the real CPI release is 2026-09-11, 8:30 AM ET =
+    12:30:00 UTC — now stored correctly as 12:29:57 under CPI_SCHEDULE_UTC.
+    If this time has already passed by deployment, it's inert (window
+    simply never opens) and can be dropped on the next cleanup pass.
+
+CHANGE LOG (2026-09-11):
+  - XAUUSDm risk_pct changed AGAIN, 33.2143 -> 2.0, per Joseph's explicit
+    instruction — the final value of a same-day sequence (7.0 -> 3.0 ->
+    33.2143 -> 2.0). At this project's documented balance range
+    ($90-373), 2% lands on the same 0.01 lot floor as several other
+    percentages tested earlier the same day (2%, 3.34%, 10% all rounded
+    to the same floor trade at $90) — so this mainly starts to
+    differentiate from those once balance clears roughly $700. Not
+    backtested at this specific level either, same as every other
+    risk_pct value set today — all explicit instructions, not backtest-
+    driven changes.
+  - REMOVED XAGUSDm from SYMBOL_CONFIG entirely, per Joseph's explicit
+    instruction. XAGUSDm's offset/SL had never been independently
+    backtested (uncalibrated, scaled off gold by relative price level
+    only — see now-removed docstring section) and its contract size
+    was never confirmed against this account's real
+    symbol_info("XAGUSDm").trade_contract_size. Only XAUUSDm remains.
+  - XAUUSDm risk_pct changed 7.0 -> 3.0, per Joseph's explicit
+    instruction (superseded later same day, see below).
+  - XAUUSDm offset REVERTED from 4.0 back to 3.0, per Joseph's explicit
+    instruction — the original value from the 2026-08-07 handoff's
+    documented mechanic, undoing the 3.0 -> 3.5 -> 4.0 widening from
+    2026-09-04. SL left at 7.0 (not reverted — not asked for). Not
+    re-validated against fresh data at this offset/current price level;
+    this is a direct instruction, not a backtest-driven change.
+  - XAUUSDm risk_pct changed AGAIN, 3.0 -> 33.2143, per Joseph's
+    explicit instruction — restoring the full original total budget
+    (previously split 14.04% XAU / 14.04% XAG / 5.26% XCU before any
+    symbol removals) now entirely onto XAUUSDm alone, since it's the
+    only symbol left in SYMBOL_CONFIG. Flagged at the time: this is an
+    11x jump from the 3.0 set earlier the same day, on a symbol whose
+    SL is confirmed (Sept 4 2026 tick data) to be a price level a fast
+    cascade can jump straight through, not an enforced payment cap —
+    sizing is no longer doing the tail-risk-management job the 2026-
+    09-08 change log describes flat 7%/3% as doing. Not backtested at
+    this risk level; explicit instruction, not a backtest-driven change.
 
 CHANGE LOG (2026-09-08):
   - REMOVED XCUUSDm (copper) from SYMBOL_CONFIG entirely. Reasoning:
@@ -97,19 +158,22 @@ CHANGE LOG (2026-09-08):
     unconfirmed against the broker (flagged since 2026-08-30 and never
     resolved), this symbol's real live behavior was the least trusted
     of the three and was dropped rather than carried further
-    unvalidated. Only XAUUSDm and XAGUSDm remain.
+    unvalidated.
   - risk_pct changed from differentiated (XAU 14.04% / XAG 14.04%) to
-    FLAT 7% on both remaining symbols. Total budget: ~33.2% (7 symbols,
-    original) -> ~28.08% (XAU+XAG only, pre-copper-removal) -> 14%
-    (flat 7% x 2, this change). Reasoning: reviewing real Sept 4 2026
-    tick data showed the SL is a price level, not an enforced payment
-    cap — a fast cascade can jump straight through it (measured ~$40
-    worst-case range on gold in the 300ms after one real trigger,
+    FLAT 7% on both symbols then live (XAU/XAG). Total budget: ~33.2%
+    (7 symbols, original) -> ~28.08% (XAU+XAG only, pre-copper-removal)
+    -> 14% (flat 7% x 2, this change). Reasoning: reviewing real Sept 4
+    2026 tick data showed the SL is a price level, not an enforced
+    payment cap — a fast cascade can jump straight through it (measured
+    ~$40 worst-case range on gold in the 300ms after one real trigger,
     against a nominal $7 SL). Flat 7% doesn't fix that mechanism, it
     just keeps the tail outcome proportionally survivable rather than
     changing the underlying risk/reward shape. A deeper fix (sizing
     lot off realistic worst-case distance instead of nominal SL) was
-    discussed and deliberately deferred, not done here.
+    discussed and deliberately deferred, not done here. NOTE: this
+    sizing-as-tail-management logic was effectively undone by the
+    2026-09-11 change above, which returns to the full 33.2143% total
+    now concentrated on one symbol instead of split across two/three.
   - `_close_position_at_market()` and `_flatten_symbol()` deviation
     changed from 10 to a large effectively-uncapped value
     (`EXIT_DEVIATION`). Root cause this fixes: at deviation=10, a
@@ -126,15 +190,22 @@ CHANGE LOG (2026-09-08):
     available price) and only changes behavior on the volatile ones,
     which is exactly when a guaranteed exit matters most.
   - 5s-early entry window (EARLY_ENTRY_SECONDS) considered for a
-    narrowing to 3s, explicitly REJECTED after discussion. The
-    mechanism that actually causes entry slippage/liquidity gaps lives
-    in the seconds AFTER the real release triggers the order, not in
-    how many seconds early the resting order was placed — moving from
-    5s to 2-3s early does not touch that mechanism at all, it only
-    shrinks the window's margin for the main loop's poll cycle to
-    reliably land inside it. Left at 5.0.
+    narrowing to 3s, explicitly REJECTED after discussion at the time
+    (superseded 2026-09-09, see below — later changed to 3s anyway).
   - Test NFP entry (2026-09-08, marked "# test" in NFP_SCHEDULE_UTC)
     left in place, untouched — not part of this change set.
+
+CHANGE LOG (2026-09-09):
+  - EARLY_ENTRY_SECONDS changed 5.0 -> 3.0. Does NOT reduce slippage —
+    the mechanism that causes slippage happens in the seconds AFTER the
+    real release triggers the order, not in how many seconds early the
+    resting order was placed. A narrower window only raises the odds a
+    poll cycle steps over it and misses the entry entirely. Joseph's
+    explicit call.
+  - All schedule literals re-shifted from 5s-early to 3s-early to match
+    (root cause of a real live bug found this day: literals were still
+    5s-early after EARLY_ENTRY_SECONDS was changed to 3.0, so orders
+    kept firing at the old 5s-early mark instead of the intended 3s).
 
 CHANGE LOG (2026-09-04, risk_pct redistribution):
   - risk_pct redistributed across just XAUUSDm/XAGUSDm/XCUUSDm, preserving
@@ -163,52 +234,45 @@ CHANGE LOG (2026-09-04, gold/silver/copper only):
 
 CHANGE LOG (2026-09-04, entry-window/polling changes):
   - All three schedule constants (NFP/CPI/FOMC_SCHEDULE_UTC) shifted 5
-    seconds EARLY relative to the real, source-verified release times.
-    Root cause this fixes: live rejections at exact release time
-    (XAUUSDm SELL retcode=10015 "Invalid price", XAGUSDm SELL
-    retcode=10006) traced to two compounding release-moment effects —
-    (1) the anchor price used to compute offset/SL is fetched a beat
-    before order_send() reaches the broker, and during the NFP spike
-    price can move enough in that gap that the calculated stop is no
-    longer where it was meant to be relative to current price, and (2)
-    brokers (Exness included) widen trade_stops_level dynamically the
-    instant high-impact volatility hits, shrinking the minimum-distance
-    room a stop order needs. Both effects are real only AT/AFTER the
-    real release moment, not before it — placing the pending straddle
-    as a RESTING order 5s before release sidesteps both, since stops-
-    level and price validation happen at placement time, not
-    continuously against a resting order.
+    seconds EARLY relative to the real, source-verified release times
+    (later changed to 3s, see 2026-09-09 above). Root cause this fixes:
+    live rejections at exact release time (XAUUSDm SELL retcode=10015
+    "Invalid price", XAGUSDm SELL retcode=10006) traced to two
+    compounding release-moment effects — (1) the anchor price used to
+    compute offset/SL is fetched a beat before order_send() reaches the
+    broker, and during the NFP spike price can move enough in that gap
+    that the calculated stop is no longer where it was meant to be
+    relative to current price, and (2) brokers (Exness included) widen
+    trade_stops_level dynamically the instant high-impact volatility
+    hits, shrinking the minimum-distance room a stop order needs. Both
+    effects are real only AT/AFTER the real release moment, not before
+    it — placing the pending straddle as a RESTING order shortly before
+    release sidesteps both, since stops-level and price validation
+    happen at placement time, not continuously against a resting order.
   - `_next_event_trigger_window()` narrowed to a HARD pre-release-only
-    window: opens at the stored (5s-early) release_time, closes AT the
-    real release moment (release_time + 5s). Previously stayed open for
-    a full 5 minutes after release to allow retries; that retry window
-    is deliberately removed. Rationale: the spike edge is about catching
-    the FIRST move — once real release has passed and price has already
-    moved, there's no move left to catch, and retrying would just
-    resubmit into the exact volatile conditions this change exists to
-    avoid. If a symbol's early placement attempt fails, that symbol sits
-    out the event; no second chance within the same release.
+    window: opens at the stored (early) release_time, closes AT the
+    real release moment. Previously stayed open for a full 5 minutes
+    after release to allow retries; that retry window is deliberately
+    removed. Rationale: the spike edge is about catching the FIRST
+    move — once real release has passed and price has already moved,
+    there's no move left to catch, and retrying would just resubmit
+    into the exact volatile conditions this change exists to avoid.
   - `_next_flatten_window()` default `lead_minutes` changed 5.0 -> 10.0
     — longer pre-event runway to guarantee nothing from either this
     strategy or straddle_strategy.py is still open going into an event.
-    Window is computed off the stored (5s-early) release_time, so in
-    real-world terms flatten now runs from 10:00 before the real release
-    down to 5s before it, handing off directly to the entry window with
-    no gap.
-  - Requires ~1s main-loop polling to be reliable — a 5-second-wide
-    entry window with slower polling (e.g. the old 30s cadence) risks
-    a poll cycle stepping over the entire window without ever checking
-    inside it, silently reverting to no entry for that event. Not
-    enforced in this file (that's main_news_spike.py's job) — noted
-    here since it's a real dependency of this change actually working.
+  - Requires ~1s main-loop polling to be reliable — a narrow entry
+    window with slower polling (e.g. the old 30s cadence) risks a poll
+    cycle stepping over the entire window without ever checking inside
+    it, silently reverting to no entry for that event. Not enforced in
+    this file (that's main_news_spike.py's job) — noted here since it's
+    a real dependency of this change actually working.
 
 CHANGE LOG (2026-08-30):
   - Added XCUUSDm (copper), risk_pct=3.2143% (same share as each FX
     pair). Offset=12.0 / SL=20.0 (price units, digits=2) — carried over
     from the single-event NFP backtest, not independently fitted to
     copper's own volatility. Total budget across all 7 symbols is now
-    33.2143% (was 30%) — unchanged unless/until Joseph asks for a
-    rebalance. REMOVED 2026-09-08 — see CHANGE LOG above.
+    33.2143% (was 30%). REMOVED 2026-09-08 — see CHANGE LOG above.
 
 CHANGE LOG (2026-08-12):
   - Re-added the unconditional final flatten check immediately before
@@ -285,9 +349,8 @@ import MetaTrader5 as mt5
 #
 # *** All timestamps below are stored 3 SECONDS EARLY relative to the real
 # release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:57).
-# CHANGED 2026-09-09: was 5s early (12:29:55) — see module docstring
-# CHANGE LOG. The real release moment for any entry here is
-# `release_time + EARLY_ENTRY_SECONDS` (3 seconds, as of this change).
+# The real release moment for any entry here is
+# `release_time + EARLY_ENTRY_SECONDS` (3 seconds).
 #
 # IMPORTANT: these are LITERAL, hand-typed timestamps — NOT computed from
 # EARLY_ENTRY_SECONDS. The entry window OPENS the moment `now >= this
@@ -297,11 +360,12 @@ import MetaTrader5 as mt5
 # window-open time and the code's internal "real release" time drift
 # out of sync with each other (found live 2026-09-09: literals were
 # still 5s-early after EARLY_ENTRY_SECONDS was changed to 3.0, so orders
-# kept firing at the old 5s-early mark instead of the intended 3s).
+# kept firing at the old 5s-early mark instead of the intended 3s. A
+# second instance of this same class of bug was found 2026-09-11 in
+# FOMC_SCHEDULE_UTC specifically — see CHANGE LOG).
 # ---------------------------------------------------------------------------
 
 NFP_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 9, 12, 29, 57, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 10, 2, 12, 29, 57, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 11, 6, 13, 29, 57, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 12, 4, 13, 29, 57, tzinfo=datetime.timezone.utc),
@@ -311,7 +375,13 @@ NFP_SCHEDULE_UTC: List[datetime.datetime] = [
 ]
 
 CPI_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 9, 12, 29, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 9, 11, 16, 49, 57, tzinfo=datetime.timezone.utc),
+    # ^ moved here from NFP_SCHEDULE_UTC 2026-09-11 — was misfiled under NFP
+    # with the wrong time (14:29:57). Confirmed via BLS: real CPI release
+    # is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST), so 3s-early is
+    # 12:29:57, not 14:29:57. If this time has already passed by the time
+    # this file is deployed, it's a no-op (window will simply never open)
+    # and can be dropped on the next cleanup.
     datetime.datetime(2026, 10, 14, 12, 29, 57, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 11, 10, 13, 29, 57, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 12, 10, 13, 29, 57, tzinfo=datetime.timezone.utc),
@@ -320,37 +390,30 @@ CPI_SCHEDULE_UTC: List[datetime.datetime] = [
 ]
 
 FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 16, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 10, 28, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 9, 19, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 1, 27, 19, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 3, 17, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 4, 28, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 6, 9, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 7, 28, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 9, 15, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 10, 27, 18, 0, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 12, 8, 19, 0, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 9, 16, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 10, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 12, 9, 18, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 1, 27, 18, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 3, 17, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 4, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 6, 9, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 7, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 9, 15, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 10, 27, 17, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 12, 8, 18, 59, 57, tzinfo=datetime.timezone.utc),
     # Decision time is 2:00 PM ET = 18:00:00 UTC during DST, 19:00:00 UTC
-    # otherwise -> stored 3s EARLY as 18:00:57 / 19:00:57 respectively.
-    # NOTE the minute rollover at 3s-early: these now land at :00:57 in
-    # the NEXT minute, not :59:55 in the prior minute as they did at 5s
-    # early — easy to mis-type, double check the minute when adding dates.
+    # otherwise -> stored 3s EARLY as 17:59:57 / 18:59:57 respectively
+    # (fixed 2026-09-11 — see CHANGE LOG; these were previously stored as
+    # 18:00:57 / 19:00:57, which is 57s AFTER the real release, not 3s
+    # before it).
+    # All 2027 dates confirmed against the Fed's own published (tentative)
+    # 2027 calendar as of 2026-09-11 — not extrapolated.
     # Add each new year's dates in one go once the Fed publishes them.
 ]
 
 # Real release time = stored schedule time + this. Kept as a named constant
 # so every place in the file that needs to reason about the REAL moment
 # (vs. the deliberately-early stored one) references the same value.
-#
-# CHANGED 2026-09-09: 5.0 -> 3.0. NOTE (carried over from discussion, not
-# re-litigated here): this does NOT reduce slippage — the mechanism that
-# causes slippage happens in the seconds AFTER the real release triggers
-# the order, not in how many seconds early the resting order was placed.
-# A narrower window only raises the odds a poll cycle steps over it and
-# misses the entry entirely (main loop's tight-polling band still needs
-# to reliably land inside this now-narrower window). Left as Joseph's
-# explicit call — flagged, not blocking.
 EARLY_ENTRY_SECONDS = 3.0
 
 # Maximum acceptable slippage (in points) on the exits THIS FILE controls
@@ -424,48 +487,49 @@ _validate_hedging_mode()
 #
 # decimals controls price rounding in _round_price().
 #
-# risk_pct: flat 7% on both symbols as of 2026-09-08 (was differentiated
-# 14.04%/14.04%/5.26% across three symbols incl. copper — see CHANGE LOG).
+# risk_pct: 2% on XAUUSDm as of 2026-09-11, after a same-day sequence
+# (7.0 -> 3.0 -> 33.2143 -> 2.0). See CHANGE LOG — all explicit
+# instructions, not backtested at any of these specific levels.
 
 SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
     "XAUUSDm": {
         "pip": 1.0,
         "point_size": 0.001,
-        "offset": 4.0,  # $ — widened again from 3.5 (2026-09-04, ~14%, focused down to gold/silver/copper only)
+        "offset": 3.0,  # $ — reverted 2026-09-11 back to the original 2024
+        # backtest value (had drifted 3.0 -> 3.5 -> 4.0 over prior widenings,
+        # see CHANGE LOG). Note: as a % of price this is smaller now than it
+        # was on the original 2024-01-02 to 2025-12-05 validation window,
+        # since gold's price level has moved since then — not re-validated
+        # at today's price level.
         "sl": 7.0,  # $ — widened again from 6.0 (2026-09-04, ~17%). Real Sept 4
         # tick data showed this is a price level, not an enforced payment
         # cap — see module docstring. Left as-is; sizing (risk_pct) is the
-        # lever being used to manage that risk instead, see below.
-        "risk_pct": 7.0,  # <<< PLACEHOLDER — CHANGE TO 2.0 AFTER 2 MORE LIVE TESTS >>>
-        # flat 2026-09-08 (was 14.04%) — of 14% total budget across
-        # the 2 remaining symbols (was ~33.3% across 3, incl. copper).
-        # Plan (2026-09-09): step down to 2.0 once the current 7% config
-        # has been validated across two more live test runs. At current
-        # balances (~$90-373), 2% and 3.34% land on the same lot-floor
-        # trade (0.01 min lot) — see 2026-09-09 discussion — so this
-        # mainly matters once balance grows past that floor threshold.
+        # lever being used to manage that risk instead, see below — though
+        # as of 2026-09-11's jump to 33.2143%, that lever is no longer
+        # pulling in the risk-reducing direction it was earlier the same day.
+        "risk_pct": 2.0,  # set 2026-09-11 (was 33.2143 earlier same day,
+        # 3.0 before that, 7.0 before that) — Joseph's explicit
+        # instruction. At the ~$90-373 balance range documented
+        # elsewhere in this project, this lands on the same 0.01 lot
+        # floor as several other percentages tested earlier the same
+        # day (2%, 3.34%, 10% all rounded to 0.01 lot at $90 balance) —
+        # so this mainly starts to matter once balance grows past
+        # roughly $700 (the point where 2% of balance / $7 SL clears
+        # the 0.005 lot-step rounding threshold).
         "decimals": 2,
-        "max_hold_seconds": 60.0,
-    },
-    "XAGUSDm": {
-        "pip": 0.01,
-        "point_size": 0.001,
-        "offset": 0.06,  # $ — widened again from 0.05 (2026-09-04, 20%) — UNCALIBRATED
-        "sl": 0.09,  # $ — widened again from 0.07 (2026-09-04, ~29%) — UNCALIBRATED
-        "risk_pct": 7.0,  # <<< PLACEHOLDER — CHANGE TO 2.0 AFTER 2 MORE LIVE TESTS >>>
-        # flat 2026-09-08 (was 14.04%) — same rationale as XAUUSDm
-        "decimals": 3,
         "max_hold_seconds": 60.0,
     },
 }
 
-RISK_PCT = 7.0  # fallback default only if a symbol's config is missing risk_pct.
+RISK_PCT = 2.0  # fallback default only if a symbol's config is missing risk_pct.
 # History: 2026-08-12 allocation scaled from an initial 14% total to 30%
 # (8.57% XAU + 8.57% XAG + 3.21%x4 FX). 2026-08-30: +3.2143% for XCUUSDm
 # -> 33.2143% total across 7 symbols. 2026-09-04: FX pairs removed
 # (gold/silver/copper only), risk_pct redistributed to preserve the same
 # 33.2143% total across XAU/XAG/XCU. 2026-09-08: copper removed, XAU/XAG
-# both set flat to 7% (14% total) — see module docstring CHANGE LOG.
+# both set flat to 7% (14% total). 2026-09-11: XAGUSDm removed; XAUUSDm
+# went 7.0 -> 3.0 -> 33.2143 -> 2.0, all same day, all explicit
+# instructions — see module docstring CHANGE LOG for the full sequence.
 MAGIC = 20260807  # unique to this strategy — must not collide with
 # straddle_strategy.py (20260716), news_confirm_strategy.py
 # (20260801), or news_reload_strategy.py (20260810)
@@ -608,10 +672,10 @@ class NewsSpikeStrategy:
         self, now: datetime.datetime
     ) -> Optional[Tuple[datetime.datetime, str]]:
         """HARD pre-release-only entry window. `release_time` values in
-        the schedule constants are stored EARLY_ENTRY_SECONDS (5s) before
-        the real release. This window opens at that stored time and
-        closes AT the real release moment
-        (`release_time + EARLY_ENTRY_SECONDS`) — NOT 5 minutes after, as
+        the schedule constants are stored EARLY_ENTRY_SECONDS before the
+        real release. This window opens at that stored time and closes
+        AT the real release moment
+        (`release_time + EARLY_ENTRY_SECONDS`) — NOT minutes after, as
         in prior revisions. Once the real release has passed, price has
         already moved and there is no retry: that symbol sits out this
         event. See module docstring CHANGE LOG for the full rationale."""
@@ -651,7 +715,7 @@ class NewsSpikeStrategy:
     ) -> Optional[Tuple[datetime.datetime, str]]:
         """Returns (release_time, event_type) if `now` is inside the
         pre-event flatten window — lead_minutes before the stored
-        (5s-early) release_time, up to release_time itself. In real-world
+        (early) release_time, up to release_time itself. In real-world
         terms this runs from lead_minutes-before-the-real-release down to
         EARLY_ENTRY_SECONDS-before-the-real-release, handing off directly
         to the entry window with no gap."""
@@ -725,12 +789,12 @@ class NewsSpikeStrategy:
         self, symbol: str, now: Optional[datetime.datetime] = None
     ) -> Dict[str, Any]:
         """Call on every poll (~1s cadence required near a scheduled event
-        — a 5-second-wide entry window with slower polling risks stepping
-        over it entirely). Places the straddle in the narrow pre-release
-        gap for whichever event type (NFP/CPI/FOMC) currently has it
-        open. manage_open_trade() then handles the hard 1-minute
-        force-close — there is no TP, no reload, and no retry past the
-        real release moment.
+        — a narrow entry window with slower polling risks stepping over
+        it entirely). Places the straddle in the narrow pre-release gap
+        for whichever event type (NFP/CPI/FOMC) currently has it open.
+        manage_open_trade() then handles the hard 1-minute force-close —
+        there is no TP, no reload, and no retry past the real release
+        moment.
 
         `now` should be a SINGLE timestamp captured ONCE per poll cycle by
         the caller (the main loop) and passed to every symbol's call that
@@ -812,7 +876,8 @@ class NewsSpikeStrategy:
         # Expiration anchored to the REAL release time (release_time +
         # EARLY_ENTRY_SECONDS), not the stored early one, so pending
         # orders that somehow survive past intended cleanup still expire
-        # at a sensible real-world moment rather than 5s too early.
+        # at a sensible real-world moment rather than a few seconds too
+        # early.
         real_release_time = release_time + datetime.timedelta(
             seconds=EARLY_ENTRY_SECONDS
         )
@@ -994,8 +1059,7 @@ class NewsSpikeStrategy:
         }
 
     def get_performance_by_symbol(self, lookback_days: int = 120) -> Dict[str, Any]:
-        """Per-symbol breakdown — worth checking regularly since XAGUSDm
-        remains unvalidated."""
+        """Per-symbol breakdown."""
         return {
             sym: self.get_performance_summary(sym, lookback_days)
             for sym in self.traded_symbols
@@ -1015,12 +1079,12 @@ class NewsSpikeStrategy:
     def __repr__(self) -> str:
         return (
             f"NewsSpikeStrategy(symbols={self.traded_symbols}, "
-            f"events=[NFP,CPI,FOMC], risk_pct=flat 7% each (14% total), "
+            f"events=[NFP,CPI,FOMC], risk_pct=2% (XAUUSDm only), "
             f"max_hold=60s, exit_deviation={EXIT_DEVIATION} (effectively uncapped), "
             f"filter=None, one_shot_per_event=True, "
             f"entry_window='pre-release only, {EARLY_ENTRY_SECONDS:.0f}s before real release, no post-release retry', "
             f"stateless=True, "
-            f"validated=['XAUUSDm'], unvalidated={[s for s in SYMBOL_CONFIG if s != 'XAUUSDm']})"
+            f"validated=['XAUUSDm'])"
         )
 
 
@@ -1037,12 +1101,12 @@ if __name__ == "__main__":
         future = [d for d in schedule if d >= now]
         print(f"{name} events scheduled: {len(schedule)} total, {len(future)} upcoming")
         print(
-            f"  Next (stored, 5s early): {min(future) if future else 'NONE — add dates'}"
+            f"  Next (stored, {EARLY_ENTRY_SECONDS:.0f}s early): {min(future) if future else 'NONE — add dates'}"
         )
     print()
     print("*** XAUUSDm backed by real, control-tested 1-min data + 1 real tick-level walkthrough ***")
-    print("*** XAGUSDm: structural extension only, minimal backtest, 1 tick-level walkthrough (unconfirmed contract spec) ***")
-    print("*** Copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
+    print("*** risk_pct=2% — final value of a same-day sequence (7% -> 3% -> 33.2143% -> 2%), not independently backtested at this level ***")
+    print("*** XAGUSDm removed 2026-09-11, copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
     print(
         f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after ***"
     )
