@@ -7,6 +7,8 @@ from strategies.news_confirm_strategy import (
     CPI_SCHEDULE_UTC,
     FOMC_SCHEDULE_UTC,
     EARLY_ENTRY_SECONDS,
+    GLOBAL_FLATTEN_RETRY_SECONDS,
+    SYMBOL_CONFIG,
 )
 from datetime import datetime, timezone, timedelta
 import os
@@ -28,53 +30,66 @@ def reload_decouple():
 
 
 # ---------------------------------------------------------------------------
-# Dynamic polling (added 2026-09-04)
+# Dynamic polling (added 2026-09-04, simplified 2026-09-12)
 # ---------------------------------------------------------------------------
-# news_spike_strategy.py's entry window is only EARLY_ENTRY_SECONDS (5s)
-# wide — see that file's own module docstring CHANGE LOG. At the old flat
-# 30s cadence, a poll cycle can step clean over that 5-second window
-# without ever checking inside it, silently losing the event (this is what
-# happened live on CPI: gold traded, silver's check landed just late
-# enough to miss the window entirely).
+# news_spike_strategy.py's entry window is only EARLY_ENTRY_SECONDS (3s)
+# wide. At a flat 30s cadence, a poll cycle can step clean over that
+# window without ever checking inside it, silently losing the event.
 #
-# Fix: poll every 1 second whenever a scheduled event is within
-# TIGHT_BAND_MINUTES, poll every 30 seconds (as before) the rest of the
-# time. This gets reliable window coverage exactly when it matters without
-# hammering MT5 with 1s IPC calls 24/7 for windows that only exist a few
-# minutes a month.
+# As of 2026-09-12, tight 1-second polling runs CONTINUOUSLY from
+# TIGHT_BAND_MINUTES before each real release through
+# max_hold_seconds + GLOBAL_FLATTEN_RETRY_SECONDS after it — one
+# unbroken stretch, not a pre-event band that drops back to 30s at
+# release and a separate post-event band. Per explicit decision:
+# everything (entry, the release-anchored close, and the portfolio-wide
+# flatten) should collapse to react promptly around ONE T+60s deadline,
+# not be spread across a longer, separate post-event window.
 TIGHT_POLL_SECONDS = 1
 NORMAL_POLL_SECONDS = 30
-TIGHT_BAND_MINUTES = 2  # safely brackets both the entry window and the
-                         # tail end of the flatten window on either side
+TIGHT_BAND_MINUTES = 2  # pre-event tight-polling lead time
+
+
+def _real_release_times() -> list[datetime]:
+    """All real (not stored-early) release times across all three
+    calendars, in one flat list. Shared by both the pre-event and
+    post-event tight-polling checks below so they always agree on what
+    "real release" means -- same EARLY_ENTRY_SECONDS constant imported
+    from news_spike_strategy.py, no duplicated/guessed offset here."""
+    return [
+        e + timedelta(seconds=EARLY_ENTRY_SECONDS)
+        for e in (NFP_SCHEDULE_UTC + CPI_SCHEDULE_UTC + FOMC_SCHEDULE_UTC)
+    ]
 
 
 def _seconds_to_next_event(now: datetime) -> float:
     """Seconds until the NEXT UPCOMING scheduled release across all three
-    calendars — forward-looking only, and corrected to the REAL release
-    time (schedule constants are stored EARLY_ENTRY_SECONDS/5s early, per
-    news_spike_strategy.py — same constant imported above so both files
-    always agree on what "real release time" means, no duplicated/
-    guessed offset here). Once `now` passes a release time, that event
-    stops counting entirely (tight polling reverts to NORMAL_POLL_SECONDS
-    immediately at the real release moment, not TIGHT_BAND_MINUTES after
-    it). Used ONLY to choose polling cadence — no trading/entry logic
-    depends on this function; that logic lives entirely in
-    news_spike_strategy.py itself.
-
-    NOTE: because this stops being "tight" right at real release, the 60s
-    force-close (manage_open_trade()) is only checked on the NORMAL
-    30s cadence from that point on, not 1s. In practice this means the
-    force-close can fire anywhere from 60 to ~89 seconds after fill,
-    same margin as the plain 30s-polling straddle bot, rather than the
-    tight ~60-61s this tight-polling band would otherwise give it."""
-    real_events = [
-        e + timedelta(seconds=EARLY_ENTRY_SECONDS)
-        for e in (NFP_SCHEDULE_UTC + CPI_SCHEDULE_UTC + FOMC_SCHEDULE_UTC)
-    ]
-    future = [e for e in real_events if e > now]
+    calendars — forward-looking only. Once `now` passes a release time,
+    that event stops counting toward THIS function; whether tight polling
+    should still apply because we're in the POST-event stretch is handled
+    separately by _in_post_event_tight_window() below. Used ONLY to
+    choose polling cadence — no trading/entry logic depends on this
+    function; that logic lives entirely in news_spike_strategy.py itself."""
+    future = [e for e in _real_release_times() if e > now]
     if not future:
         return float("inf")
     return (min(future) - now).total_seconds()
+
+
+def _in_post_event_tight_window(now: datetime) -> bool:
+    """Simplified 2026-09-12 to match the single T+60s deadline. True if
+    `now` falls within [real_release, real_release + max_hold_seconds +
+    GLOBAL_FLATTEN_RETRY_SECONDS] for ANY past event — i.e. we're still
+    inside the event's own hold period or the short retry margin right
+    after its close deadline, and should stay on tight polling rather
+    than reverting to normal cadence early. Uses XAUUSDm's
+    max_hold_seconds as the reference hold time (the only symbol
+    configured in news_spike_strategy.py)."""
+    hold_seconds = SYMBOL_CONFIG.get("XAUUSDm", {}).get("max_hold_seconds", 60.0)
+    post_event_span = timedelta(seconds=hold_seconds + GLOBAL_FLATTEN_RETRY_SECONDS)
+    for real_release in _real_release_times():
+        if real_release <= now <= real_release + post_event_span:
+            return True
+    return False
 
 
 def sleep_until_next_tick(now: datetime, interval: int):
@@ -96,7 +111,10 @@ LIVE = False  # NOT backtested at all for most symbols — see
 
 # Fourth standalone process, own magic number, no shared loop with
 # straddle_strategy.py, news_confirm_strategy.py's own confirm mechanic,
-# or news_reload_strategy.py.
+# or news_reload_strategy.py -- EXCEPT for check_global_flatten() below,
+# which is a deliberate, narrow, explicit exception: see
+# news_spike_strategy.py's 2026-09-12 CHANGE LOG for why the
+# portfolio-wide flatten intentionally crosses strategy boundaries.
 
 
 def main():
@@ -147,9 +165,10 @@ def main():
                 print(f"   {pending_status}")
 
             # has_own_open_trade() filters by this strategy's own MAGIC
-            # before answering — see news_spike_strategy.py docstring for
-            # the bug this fixes on shared symbols (EURUSDm/GBPUSDm/
-            # USDJPYm/XAUUSDm, also traded by straddle_strategy.py).
+            # before answering, and (as of 2026-09-12) checks for ANY
+            # number of open positions, not just one — see
+            # news_spike_strategy.py docstring for both the shared-symbol
+            # bug this originally fixed and the dual-fill-aware update.
             if strategy.has_own_open_trade(symbol):
                 status = strategy.manage_open_trade(symbol)
                 print(f"   {status}")
@@ -162,12 +181,31 @@ def main():
             signal = strategy.check_and_place(symbol, now)
             print(f"   {signal['reason']}")
 
+        # ── Portfolio-wide global flatten (added 2026-09-12) ────────────
+        # Called ONCE PER CYCLE, OUTSIDE the per-symbol loop above --
+        # unlike manage_pending_orders()/manage_open_trade()/
+        # check_and_place(), which are per-symbol. Targets a SINGLE
+        # deadline (real_release + max_hold_seconds, i.e. T+60s) with
+        # only a short GLOBAL_FLATTEN_RETRY_SECONDS safety margin for
+        # retries -- not a separate, longer post-event window. Closes
+        # EVERY open position and cancels EVERY pending order on the
+        # WHOLE ACCOUNT (any symbol, any magic) at that moment. No-ops
+        # entirely outside that narrow band. See news_spike_strategy.py's
+        # 2026-09-12 CHANGE LOG for the full rationale -- this
+        # deliberately touches positions opened by OTHER strategies
+        # (e.g. straddle_strategy.py, MAGIC=20260716), a narrow, explicit
+        # exception to this project's usual strategy-isolation pattern.
+        flatten_status = strategy.check_global_flatten(now)
+        if flatten_status:
+            print(f"\n{flatten_status}")
+
         print("\nCycle done")
 
         gap_seconds = _seconds_to_next_event(now)
+        post_event = _in_post_event_tight_window(now)
         interval = (
             TIGHT_POLL_SECONDS
-            if gap_seconds <= TIGHT_BAND_MINUTES * 60
+            if (gap_seconds <= TIGHT_BAND_MINUTES * 60 or post_event)
             else NORMAL_POLL_SECONDS
         )
         sleep_until_next_tick(datetime.now(timezone.utc), interval)
