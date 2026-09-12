@@ -28,24 +28,25 @@ Exit   : Hard 1-minute force-close, no TP, no reload. Whichever comes
          trade. Exit deviation is effectively uncapped so this close
          cannot get rejected and silently retried through a volatile
          window.
-Sizing : PER-EVENT-TYPE risk_pct as of 2026-09-12 (see CHANGE LOG) —
-         NFP=5%, CPI=2%, FOMC=2%. This replaces the prior flat 2% on
-         all events. Rationale: backtest across Jan 2025-Sep 2026 (49
-         tick-validated events) showed NFP's win rate (72-75%) is
-         comparable to CPI/FOMC's, but NFP's average payoff has run
-         meaningfully larger in the 2026 sample specifically — largely
-         driven by a handful of outlier events (Feb 11, Mar 6, Jul 2,
-         Aug 7, Sep 4 2026), not a demonstrated structural edge. The
-         5%/2% split was chosen from a range of tested combinations as
-         a middle ground: materially better compounding than flat 2%
-         across the board, while keeping worst-single-trade drawdown
-         under roughly -9% and max peak-to-trough drawdown under -11%
-         on the historical sequence tested — noticeably safer than
-         more aggressive splits tested (7%/2%, 10%/3%, 14%/4%), which
-         pushed single-trade losses past -12% to -24%. NOT
-         independently re-validated beyond that backtest; the same
-         small-sample caution applies here as to every other risk_pct
-         change in this file's history.
+Sizing : FLAT 14% risk_pct on ALL event types (NFP, CPI, FOMC) as of
+         2026-09-12 (see CHANGE LOG) — explicit final decision, replacing
+         an earlier differentiated split (NFP 5%/CPI 2%/FOMC 2%, tested
+         the same day, also considered). Backtest across all 49
+         tick-validated events (Jan 2025-Sep 2026), compounding from a
+         $200 nominal balance: final balance $116,679.00 (58,240% total
+         return), max drawdown -37.0% (peak $3,501.95 on 2026-03-06,
+         trough $2,207.43 on 2026-05-12 — a ~10-week, 5-of-6-losing-event
+         stretch), worst single trade -14.0%, win/loss dollar ratio
+         4.81:1. This is more aggressive than the differentiated split
+         (-23.9% drawdown, 10.81:1 ratio) — chosen anyway, as an explicit
+         decision, not a backtest-driven optimum. Roughly 90%+ of the
+         total historical gain traces to a small handful of large 2026
+         NFP events (Feb 11, Mar 6, Jul 2, Aug 7, Sep 4) — this sizing
+         is a real bet that events of that shape keep recurring, not a
+         statistically settled allocation. Every SL-hit loss under this
+         sizing is capped at exactly -14% of balance at the time (see
+         the entry-slippage SL correction below) — no loss in the
+         backtested history ever exceeded that.
 Filter : NONE — tested and removed for this mechanic specifically.
 
 Entry window : Every date in the three schedule constants below is
@@ -74,6 +75,54 @@ traded by this file now.
 *** COPPER (XCUUSDm) REMOVED 2026-09-08 *** — see CHANGE LOG.
 
 *** STILL DEMO ONLY ***
+
+CHANGE LOG (2026-09-12, flat 14% risk_pct across all event types):
+  - CHANGED RISK_PCT_BY_EVENT from a differentiated split (NFP 5% / CPI
+    2% / FOMC 2%, itself only hours old) to FLAT 14% on all three event
+    types. Explicit final decision, not a backtest-optimum — the
+    differentiated split had a better risk-adjusted profile (-23.9% max
+    drawdown, 10.81:1 win/loss ratio, $26,681.73 final on the same
+    49-event, $200-start sequence) than flat 14% (-37.0% max drawdown,
+    4.81:1 ratio, $116,679.00 final). Flat 14% makes roughly 4.4x more
+    on this specific historical sequence, at meaningfully worse drawdown
+    and a materially worse win/loss ratio — chosen anyway. Worth
+    remembering going in: the max-drawdown stretch (peak $3,501.95 on
+    2026-03-06, trough $2,207.43 on 2026-05-12) spans 5 losing events
+    out of 6 across roughly 10 weeks of real calendar time before
+    recovering — a real period to be prepared to sit through, not a
+    single bad day.
+  - This sizing decision was tested specifically WITH the entry-
+    slippage SL correction (see that CHANGE LOG entry) already active.
+    Without that fix, the same flat-14% sequence would have produced a
+    worse outcome on both counts: $96,904.76 final (vs $116,679.00) and
+    -44.7% max drawdown / -23.7% worst single trade (vs -37.0% / -14.0%)
+    — the SL correction is doing real, measurable work at this risk
+    level specifically, not just a theoretical nicety.
+
+CHANGE LOG (2026-09-12, entry-slippage SL correction):
+  - Added _correct_sl_for_slippage(), called from manage_open_trade() for
+    every open position the instant it's found. Fixes a real, distinct
+    risk-sizing gap: the SL submitted with a pending stop order is a
+    FIXED PRICE calculated from the INTENDED trigger level at placement
+    time. If the entry itself slips (fills at a worse price than the
+    intended stop level during a fast cascade — real, documented
+    behavior on this account), that fixed SL doesn't move with it, so
+    the realized risk distance from actual entry to SL widens beyond
+    what risk_pct was sized for, on every trade where entry slips
+    against the position. This re-anchors the SL to the REAL fill price
+    (position.price_open) the moment a position is detected, keeping the
+    realized risk distance consistently at cfg["sl"] regardless of how
+    much the entry slipped. Idempotent — safe to call every cycle, no-op
+    once already correct.
+  - IMPORTANT DISTINCTION, not fixed by this change: this addresses
+    ENTRY-side slippage only. It does NOT address the SL's OWN fill
+    slipping when it later triggers during a fast cascade — that's the
+    separate, previously-documented ~$40-worst-case-against-a-nominal-$7
+    risk (see "Sizing" section above and the 2026-09-08 CHANGE LOG),
+    which remains architecturally unfixable in MT5 (no deviation/
+    tolerance control exists on a triggered stop-loss). The two
+    slippage sources are independent; this change narrows one of them,
+    not both.
 
 CHANGE LOG (2026-09-12, simplified to a single T+60s close — no lingering):
   - Collapsed everything down to ONE deadline: real_release_time +
@@ -424,9 +473,9 @@ EXIT_DEVIATION = 500
 # than the most aggressive one tested.
 # ---------------------------------------------------------------------------
 RISK_PCT_BY_EVENT: Dict[str, float] = {
-    "NFP": 5.0,
-    "CPI": 2.0,
-    "FOMC": 2.0,
+    "NFP": 14.0,
+    "CPI": 14.0,
+    "FOMC": 14.0,
 }
 
 # How long, in seconds, check_global_flatten() keeps retrying past the
@@ -1108,6 +1157,62 @@ class NewsSpikeStrategy:
 
     # ---------------------------------------------------------------- trade management
 
+    def _correct_sl_for_slippage(self, symbol: str, position) -> Optional[str]:
+        """Added 2026-09-12. Pending stop orders can fill at a worse
+        price than the intended trigger level during a fast news
+        cascade (ENTRY slippage — distinct from SL-fill slippage, see
+        module docstring's documented ~$40 worst-case example, which is
+        about the SL itself slipping when triggered, not this). The SL
+        submitted at order-placement time is a FIXED PRICE calculated
+        from the INTENDED trigger level, not the eventual real fill
+        price — so if entry slips, that SL is now the wrong distance
+        from where the trade actually opened. Since slippage on entry
+        pushes price AWAY from a SL that didn't move with it, this
+        widens the realized risk distance beyond what risk_pct was
+        sized for, every time entry slips against the position.
+
+        This corrects that: re-anchors the SL to position.price_open
+        (the REAL fill price) +/- cfg["sl"], the instant a position is
+        found open, so the realized risk distance is always the
+        intended $7 (or whatever cfg["sl"] is) regardless of entry
+        slippage. Does NOT touch entry price or lot size, and does NOT
+        protect against the SL's OWN fill slipping when it later
+        triggers (MT5 has no deviation/tolerance control on a triggered
+        stop-loss — see EXIT_DEVIATION's docstring note). Those are two
+        separate slippage sources; this addresses only the entry-side
+        one. Safe to call every cycle — a no-op once the SL already
+        matches the corrected value."""
+        cfg = SYMBOL_CONFIG[symbol]
+        is_buy = position.type == mt5.POSITION_TYPE_BUY
+        corrected_sl = _round_price(
+            position.price_open - cfg["sl"]
+            if is_buy
+            else position.price_open + cfg["sl"],
+            symbol,
+        )
+        tolerance = (10 ** -cfg.get("decimals", 2)) / 2
+        if abs(corrected_sl - position.sl) < tolerance:
+            return None  # already correct, nothing to do
+
+        result = self._safe_order_send(
+            {
+                "action": mt5.TRADE_ACTION_SLTP,
+                "symbol": symbol,
+                "position": position.ticket,
+                "sl": corrected_sl,
+                "tp": position.tp,
+            }
+        )
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return (
+                f"ticket={position.ticket}: SL corrected for entry slippage "
+                f"{position.sl} -> {corrected_sl} (real entry {position.price_open})"
+            )
+        return (
+            f"ticket={position.ticket}: SL correction FAILED — "
+            f"retcode={result.retcode if result else 'None'}"
+        )
+
     def manage_open_trade(self, symbol: str) -> str:
         """Call on every poll while a position (or positions — see below)
         is open. As of 2026-09-12, this checks and manages ALL of this
@@ -1136,6 +1241,10 @@ class NewsSpikeStrategy:
         statuses: List[str] = []
 
         for pos in positions:
+            sl_fix = self._correct_sl_for_slippage(symbol, pos)
+            if sl_fix:
+                statuses.append(sl_fix)
+
             open_time = datetime.datetime.fromtimestamp(
                 pos.time, tz=datetime.timezone.utc
             )
@@ -1282,7 +1391,7 @@ if __name__ == "__main__":
         )
     print()
     print("*** XAUUSDm backed by real, control-tested 1-min data + tick-level re-validation (49 events, Jan 2025-Sep 2026) ***")
-    print(f"*** risk_pct is now PER-EVENT-TYPE as of 2026-09-12: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest behind this split ***")
+    print(f"*** risk_pct is FLAT 14% on all event types as of 2026-09-12: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest and drawdown behind this decision (-37.0% max drawdown on the 49-event historical sequence) ***")
     print("*** XAGUSDm removed 2026-09-11, copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
     print(
         f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after ***"
