@@ -1,7 +1,7 @@
 import time
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
-from strategies.news_confirm_strategy import (
+from strategies.news_spike_strategy import (
     NewsSpikeStrategy,
     NFP_SCHEDULE_UTC,
     CPI_SCHEDULE_UTC,
@@ -32,18 +32,19 @@ def reload_decouple():
 # ---------------------------------------------------------------------------
 # Dynamic polling (added 2026-09-04, simplified 2026-09-12)
 # ---------------------------------------------------------------------------
-# news_spike_strategy.py's entry window is only EARLY_ENTRY_SECONDS (3s)
-# wide. At a flat 30s cadence, a poll cycle can step clean over that
-# window without ever checking inside it, silently losing the event.
+# news_spike_strategy.py's entry window is only EARLY_ENTRY_SECONDS (now
+# 1s, narrowed from 3s -- see that file's own CHANGE LOG) wide. At a flat
+# 30s cadence, a poll cycle can step clean over that window without ever
+# checking inside it, silently losing the event.
 #
-# As of 2026-09-12, tight 1-second polling runs CONTINUOUSLY from
-# TIGHT_BAND_MINUTES before each real release through
-# max_hold_seconds + GLOBAL_FLATTEN_RETRY_SECONDS after it — one
-# unbroken stretch, not a pre-event band that drops back to 30s at
-# release and a separate post-event band. Per explicit decision:
-# everything (entry, the release-anchored close, and the portfolio-wide
-# flatten) should collapse to react promptly around ONE T+60s deadline,
-# not be spread across a longer, separate post-event window.
+# Tight 1-second polling runs CONTINUOUSLY from TIGHT_BAND_MINUTES before
+# each real release through max_hold_seconds + GLOBAL_FLATTEN_RETRY_
+# SECONDS after it — one unbroken stretch, not a pre-event band that
+# drops back to 30s at release and a separate post-event band. Per
+# explicit decision: everything (entry, the release-anchored close, and
+# the portfolio-wide flatten) should collapse to react promptly around
+# ONE T+60s deadline, not be spread across a longer, separate post-event
+# window.
 TIGHT_POLL_SECONDS = 1
 NORMAL_POLL_SECONDS = 30
 TIGHT_BAND_MINUTES = 2  # pre-event tight-polling lead time
@@ -76,14 +77,13 @@ def _seconds_to_next_event(now: datetime) -> float:
 
 
 def _in_post_event_tight_window(now: datetime) -> bool:
-    """Simplified 2026-09-12 to match the single T+60s deadline. True if
-    `now` falls within [real_release, real_release + max_hold_seconds +
-    GLOBAL_FLATTEN_RETRY_SECONDS] for ANY past event — i.e. we're still
-    inside the event's own hold period or the short retry margin right
-    after its close deadline, and should stay on tight polling rather
-    than reverting to normal cadence early. Uses XAUUSDm's
-    max_hold_seconds as the reference hold time (the only symbol
-    configured in news_spike_strategy.py)."""
+    """True if `now` falls within [real_release, real_release +
+    max_hold_seconds + GLOBAL_FLATTEN_RETRY_SECONDS] for ANY past event
+    — i.e. we're still inside the event's own hold period or the short
+    retry margin right after its close deadline, and should stay on
+    tight polling rather than reverting to normal cadence early. Uses
+    XAUUSDm's max_hold_seconds as the reference hold time (the only
+    symbol configured in news_spike_strategy.py)."""
     hold_seconds = SYMBOL_CONFIG.get("XAUUSDm", {}).get("max_hold_seconds", 60.0)
     post_event_span = timedelta(seconds=hold_seconds + GLOBAL_FLATTEN_RETRY_SECONDS)
     for real_release in _real_release_times():
@@ -113,8 +113,8 @@ LIVE = False  # NOT backtested at all for most symbols — see
 # straddle_strategy.py, news_confirm_strategy.py's own confirm mechanic,
 # or news_reload_strategy.py -- EXCEPT for check_global_flatten() below,
 # which is a deliberate, narrow, explicit exception: see
-# news_spike_strategy.py's 2026-09-12 CHANGE LOG for why the
-# portfolio-wide flatten intentionally crosses strategy boundaries.
+# news_spike_strategy.py's CHANGE LOG for why the portfolio-wide flatten
+# intentionally crosses strategy boundaries.
 
 
 def main():
@@ -147,8 +147,8 @@ def main():
         # internally, so a slower symbol earlier in the loop (real
         # order_send() round-trips, slower during a volatile print) could
         # push the clock far enough that a later symbol in the SAME cycle,
-        # for the SAME event, saw its 5s window already closed. All
-        # symbols checked this cycle are now judged against the exact same
+        # for the SAME event, saw its window already closed. All symbols
+        # checked this cycle are now judged against the exact same
         # instant, regardless of loop position or how long earlier symbols
         # took.
         now = datetime.now(timezone.utc)
@@ -165,10 +165,10 @@ def main():
                 print(f"   {pending_status}")
 
             # has_own_open_trade() filters by this strategy's own MAGIC
-            # before answering, and (as of 2026-09-12) checks for ANY
-            # number of open positions, not just one — see
-            # news_spike_strategy.py docstring for both the shared-symbol
-            # bug this originally fixed and the dual-fill-aware update.
+            # before answering, and checks for ANY number of open
+            # positions, not just one — see news_spike_strategy.py
+            # docstring for both the shared-symbol bug this originally
+            # fixed and the dual-fill-aware update.
             if strategy.has_own_open_trade(symbol):
                 status = strategy.manage_open_trade(symbol)
                 print(f"   {status}")
@@ -181,7 +181,7 @@ def main():
             signal = strategy.check_and_place(symbol, now)
             print(f"   {signal['reason']}")
 
-        # ── Portfolio-wide global flatten (added 2026-09-12) ────────────
+        # ── Portfolio-wide global flatten ────────────────────────────────
         # Called ONCE PER CYCLE, OUTSIDE the per-symbol loop above --
         # unlike manage_pending_orders()/manage_open_trade()/
         # check_and_place(), which are per-symbol. Targets a SINGLE
@@ -191,10 +191,10 @@ def main():
         # EVERY open position and cancels EVERY pending order on the
         # WHOLE ACCOUNT (any symbol, any magic) at that moment. No-ops
         # entirely outside that narrow band. See news_spike_strategy.py's
-        # 2026-09-12 CHANGE LOG for the full rationale -- this
-        # deliberately touches positions opened by OTHER strategies
-        # (e.g. straddle_strategy.py, MAGIC=20260716), a narrow, explicit
-        # exception to this project's usual strategy-isolation pattern.
+        # CHANGE LOG for the full rationale -- this deliberately touches
+        # positions opened by OTHER strategies (e.g. straddle_strategy.py,
+        # MAGIC=20260716), a narrow, explicit exception to this project's
+        # usual strategy-isolation pattern.
         flatten_status = strategy.check_global_flatten(now)
         if flatten_status:
             print(f"\n{flatten_status}")

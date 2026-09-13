@@ -50,12 +50,12 @@ Sizing : FLAT 14% risk_pct on ALL event types (NFP, CPI, FOMC) as of
 Filter : NONE — tested and removed for this mechanic specifically.
 
 Entry window : Every date in the three schedule constants below is
-         stored 3 SECONDS EARLY relative to the real, source-verified
-         release time. The entry window opens at the stored (early)
-         time and closes hard AT the real release. If a straddle has
-         not been placed by the real release moment, that symbol sits
-         out the event entirely — no retry after price has already
-         moved.
+         stored 1 SECOND EARLY relative to the real, source-verified
+         release time (narrowed from 3s to 1s on 2026-09-12, see CHANGE
+         LOG). The entry window opens at the stored (early) time and
+         closes hard AT the real release. If a straddle has not been
+         placed by the real release moment, that symbol sits out the
+         event entirely — no retry after price has already moved.
 
 *** VALIDATED EVIDENCE — XAUUSDm ONLY ***
 XAUUSDm is backed by real, minute-level, control-tested backtest data
@@ -67,7 +67,9 @@ remembering: 2026's per-event payoff sizes were much larger than
 2025's on this same mechanic, most plausibly a market-regime effect
 (2026 gold has been far more volatile/trending than 2025), not
 evidence the mechanic itself got better. Sizing decisions should not
-assume 2026's dollar magnitudes repeat.
+assume 2026's dollar magnitudes repeat. NOTE: the 1s-early entry window
+change (below) was NOT re-backtested against tick data before going
+live — see that CHANGE LOG entry for why, and what to watch for.
 
 *** XAGUSDm REMOVED 2026-09-11 *** — see CHANGE LOG. Only XAUUSDm is
 traded by this file now.
@@ -75,6 +77,51 @@ traded by this file now.
 *** COPPER (XCUUSDm) REMOVED 2026-09-08 *** — see CHANGE LOG.
 
 *** STILL DEMO ONLY ***
+
+CHANGE LOG (2026-09-12, EARLY_ENTRY_SECONDS narrowed to 1s + naming fix):
+  - EARLY_ENTRY_SECONDS changed 3.0 -> 1.0. Per explicit instruction,
+    final change of this session. NOT independently backtested against
+    tick data before this change — unlike every other parameter change
+    in this file's history (offset, SL, risk_pct, hold time), this one
+    went live on judgment alone. Worth being aware of the mechanism this
+    revisits: the 2026-09-09 CHANGE LOG entry (5s -> 3s) explicitly
+    noted narrowing the window does NOT reduce slippage — slippage
+    happens in the seconds AFTER the real release triggers the order,
+    not in how many seconds early the resting order was placed — and
+    that a narrower window only raises the odds a poll cycle steps over
+    it and misses the entry entirely. That reasoning applies exactly the
+    same going from 3s to 1s, more acutely: 1 second is a tight target
+    for even 1-second-cadence polling to reliably land inside. If entries
+    start being missed after this change, that mechanism is the first
+    place to look.
+  - ALL THREE schedule constants (NFP/CPI/FOMC_SCHEDULE_UTC) manually
+    re-shifted from 3s-early to 1s-early to match (:57 -> :59 seconds
+    field throughout) — same class of bug already caught twice before in
+    this file's history (2026-09-09 or literals stayed 5s-early after the
+    constant changed to 3.0; 2026-09-11 FOMC literals were stored 57s
+    AFTER release instead of 3s before). Every literal was individually
+    checked against the real release time this time, not just pattern-
+    matched.
+  - FOUND AND FIXED, while re-shifting: CPI_SCHEDULE_UTC's Sept 11, 2026
+    entry was stored as `16, 49, 57` — completely inconsistent with its
+    own adjacent comment, which correctly states the real release is
+    12:30:00 UTC and the stored value should be 3s-early (12:29:57).
+    This was a stale/corrupted literal, not a real 16:49 event. Corrected
+    to the proper 1s-early value (12:29:59) based on the real, already-
+    source-verified release time. If this file was deployed with the
+    16:49:57 value at any point, that CPI event's entry window would
+    never have opened during the actual release at all.
+  - FIXED the import in main_news_spike.py: it was importing
+    NewsSpikeStrategy and the schedule constants from
+    `strategies.news_confirm_strategy` (a DIFFERENT strategy — wait-and-
+    confirm entry, trail-managed exit, MAGIC=20260801) instead of
+    `strategies.news_spike_strategy` (THIS file, MAGIC=20260807). This
+    was flagged early in this session and deliberately set aside at the
+    time ("the import is the least of our worries") while the actual
+    mechanics were worked out — fixed now as part of final cleanup.
+    Everything in this file's own CHANGE LOG assumes it's the strategy
+    actually being run; if the import was never fixed, none of it would
+    have been.
 
 CHANGE LOG (2026-09-12, flat 14% risk_pct across all event types):
   - CHANGED RISK_PCT_BY_EVENT from a differentiated split (NFP 5% / CPI
@@ -176,15 +223,7 @@ CHANGE LOG (2026-09-12, portfolio-wide flatten at event deadline):
     main_news_spike.py, OUTSIDE the per-symbol loop (unlike
     manage_pending_orders()/manage_open_trade()/check_and_place(),
     which are called once per symbol in traded_symbols — currently just
-    XAUUSDm). A one-line addition to main_news_spike.py's main loop,
-    right after the `now = datetime.now(timezone.utc)` capture and
-    before or after the `for symbol in strategy.traded_symbols:` block:
-        flatten_status = strategy.check_global_flatten(now)
-        if flatten_status:
-            print(flatten_status)
-    Without this addition, the portfolio-wide flatten NEVER RUNS, no
-    matter what this file does — it is not wired into the polling loop
-    on its own.
+    XAUUSDm). Confirmed wired in — see main_news_spike.py.
   - GLOBAL_FLATTEN_WINDOW_SECONDS = 120.0: the flatten stays "active"
     (keeps retrying, idempotently — closing zero positions costs
     nothing) for 2 minutes after each event's release+60s deadline, in
@@ -225,16 +264,6 @@ CHANGE LOG (2026-09-12, OCO cancellation removed + release-anchored close):
     given position belongs to (the most recent real release at or before
     the position's own open time) — stateless, same pattern as
     everything else in this file, no stored event-to-position mapping.
-    Backtested effect on the full 49-event sequence: net P&L moved from
-    +$518.92 (old entry+60s rule) to +$506.87 (release+60s rule) — a
-    small (~$12) net cost, traded for materially simpler logic and for
-    correctly cancelling orders that never trigger within the release
-    minute (previously, a very late incidental fill — e.g. the 2026-03-06
-    NFP that didn't trigger until 4m46s after release on unrelated drift,
-    not a real reaction to the news — could still open a position and
-    run a full fresh 60s from that late, disconnected-from-the-news
-    entry; now such an order is simply cancelled if it hasn't filled
-    within the release minute).
   - FIXED a real bug this change exposed: _get_position() only ever
     returned the FIRST matching open position for this strategy's MAGIC
     number. Once OCO cancellation is removed, a dual-fill produces TWO
@@ -242,102 +271,60 @@ CHANGE LOG (2026-09-12, OCO cancellation removed + release-anchored close):
     (requires hedging mode, already a documented account requirement).
     The old code would have force-closed only one of the two — the
     other would have stayed open indefinitely with no exit logic ever
-    checking on it again, a genuine unmanaged-risk bug, not a rare edge
-    case, given dual-fills are now an expected ~24% occurrence rather
-    than something actively prevented. Added _get_positions() (plural)
-    returning ALL of this strategy's own open positions on a symbol;
-    manage_open_trade() now iterates and force-closes each independently
-    once past ITS event's release+60s deadline. has_open_position() /
-    has_own_open_trade() updated to check for ANY open position, not
-    just a single one.
+    checking on it again. Added _get_positions() (plural) returning ALL
+    of this strategy's own open positions on a symbol; manage_open_trade()
+    now iterates and force-closes each independently once past ITS
+    event's release+60s deadline. has_open_position() / has_own_open_trade()
+    updated to check for ANY open position, not just a single one.
 
 CHANGE LOG (2026-09-12, per-event-type risk_pct):
   - Replaced flat risk_pct=2.0 (same for every event type) with
     RISK_PCT_BY_EVENT = {"NFP": 5.0, "CPI": 2.0, "FOMC": 2.0}.
-    SYMBOL_CONFIG["XAUUSDm"]["risk_pct"] is now a FALLBACK ONLY, used if
-    an event_type somehow isn't in RISK_PCT_BY_EVENT (shouldn't happen
-    in normal operation, since _next_event_trigger_window() only ever
-    returns NFP/CPI/FOMC).
-  - _base_lot() now accepts an explicit risk_pct_override parameter.
-    check_and_place() resolves the event-type-specific risk_pct right
-    after the trigger window match (event_type is already known at that
-    point) and passes it through, rather than _base_lot() reading a
-    single fixed value off SYMBOL_CONFIG.
+    SUPERSEDED later the same day by flat 14% — see entry above.
   - Backing evidence: full tick-level backtest, Jan 2025-Sep 2026, 49
     validated events (52 scheduled, 3 never triggered within the
-    release+60s window and produced no trade). Real dual-fills — both
-    the buy-stop and sell-stop triggering on the same event, which this
-    file's own OCO cancellation (see manage_pending_orders()) does NOT
-    fully prevent under real-world poll-cycle timing — occurred on 12
-    of the 49 (~24%), net -$6.35/unit across those 12. This was a
-    conscious, explicit decision: rather than build additional
-    cancellation-race mitigation, dual-fills are accepted as a small,
-    bounded cost of a simpler system. Net result across all 49 events
-    at $7 SL, $1/unit terms: +$567.09, 73.5% win rate. Per-type: NFP
-    72-75% win rate but far larger average payoff than CPI/FOMC in the
-    2026 half of the sample specifically (see Sizing note above for the
-    caution on reading too much into that).
-  - Manual sizing simulation (not automated in this file) tested several
-    NFP/other risk_pct combinations against this same 49-event sequence
-    starting from a nominal $200 balance: 14%/4% -> $42,637 final but
-    -23.8% worst single trade / -27.8% max drawdown; 10%/3% -> $12,859
-    final, -17.0%/-20.2%; 7%/2% -> $4,240 final, -11.9%/-14.1%; 5%/2%
-    (THIS CHANGE) -> $2,425 final, -8.5%/-10.8%; 4%/1.5% -> $1,483
-    final, -6.8%/-8.6%. 5%/2% was chosen as a reasonable middle point,
-    not the highest-return option tested — deliberately favoring
-    survivable drawdown over maximum historical return, given the
-    small sample size and the outlier-driven nature of 2026's largest
-    NFP wins.
+    release+60s window and produced no trade). Real dual-fills occurred
+    on 12 of the 49 (~24%), net -$6.35/unit across those 12. Net result
+    across all 49 events at $7 SL, $1/unit terms: +$567.09, 73.5% win
+    rate.
 
 CHANGE LOG (2026-09-11, schedule fixes):
   - FIXED FOMC_SCHEDULE_UTC: every literal was stored as XX:00:57 (57s
     AFTER real release) instead of XX:59:57 (3s before). Corrected.
-    NFP/CPI literals checked and found correct.
+    NFP/CPI literals checked and found correct AT THE TIME — the CPI
+    Sept 11 literal was found stale/wrong later, see 2026-09-12 entry
+    above.
   - Removed stale 2026-09-09 NFP test entry.
-  - Moved a misfiled NFP-labeled entry to CPI_SCHEDULE_UTC and corrected
-    its time (was 14:29:57, real CPI release is 12:29:57 3s-early).
-  - XAUUSDm risk_pct changed AGAIN, 33.2143 -> 2.0. SUPERSEDED 2026-09-12
-    — see per-event-type risk_pct change above.
-  - REMOVED XAGUSDm from SYMBOL_CONFIG entirely — never independently
-    backtested, contract size never confirmed against the broker.
-  - XAUUSDm risk_pct changed 7.0 -> 3.0 (superseded later same day).
+  - Moved a misfiled NFP-labeled entry to CPI_SCHEDULE_UTC.
+  - XAUUSDm risk_pct changed AGAIN, 33.2143 -> 2.0.
+  - REMOVED XAGUSDm from SYMBOL_CONFIG entirely.
   - XAUUSDm offset REVERTED from 4.0 back to 3.0 (original 2026-08-07
     value). SL left at 7.0.
-  - XAUUSDm risk_pct changed AGAIN, 3.0 -> 33.2143 — restoring the full
-    original total budget now entirely onto XAUUSDm alone.
 
 CHANGE LOG (2026-09-08):
-  - REMOVED XCUUSDm (copper) — drastically lower leverage than gold/
-    silver, forced an unusually large lot count; volume_min/max/step
-    also never confirmed against the broker.
+  - REMOVED XCUUSDm (copper).
   - risk_pct changed from differentiated to FLAT 7% (XAU/XAG).
   - `_close_position_at_market()` / `_flatten_symbol()` deviation
-    changed from 10 to EXIT_DEVIATION (effectively uncapped) — fixes
-    real rejected force-closes/flattens during volatility that could
-    silently drift the "hard 60-second" exit well past 60s.
-  - 5s-early entry window considered for narrowing to 3s, rejected at
-    the time (superseded 2026-09-09 — later changed to 3s anyway).
+    changed from 10 to EXIT_DEVIATION (effectively uncapped).
 
 CHANGE LOG (2026-09-09):
   - EARLY_ENTRY_SECONDS changed 5.0 -> 3.0. Does NOT reduce slippage —
     a narrower window only raises the odds a poll cycle steps over it
-    and misses the entry entirely.
+    and misses the entry entirely. SUPERSEDED 2026-09-12 (3.0 -> 1.0).
   - All schedule literals re-shifted from 5s-early to 3s-early to match.
 
 CHANGE LOG (2026-09-04, risk_pct redistribution):
-  - risk_pct redistributed across XAUUSDm/XAGUSDm/XCUUSDm, preserving
-    the original 33.2143% total budget. SUPERSEDED 2026-09-08.
+  - risk_pct redistributed across XAUUSDm/XAGUSDm/XCUUSDm. SUPERSEDED
+    2026-09-08.
 
 CHANGE LOG (2026-09-04, gold/silver/copper only):
   - FX pairs (EURUSDm, GBPUSDm, USDJPYm, USDCADm) REMOVED entirely.
-    This strategy now trades ONLY XAUUSDm, XAGUSDm, XCUUSDm.
 
 CHANGE LOG (2026-09-04, entry-window/polling changes):
-  - All three schedule constants shifted 5s EARLY (later 3s) relative
-    to real release times — fixes live rejections (retcode=10015/10006)
-    from anchor-price staleness and dynamic trade_stops_level widening
-    at the exact release moment. Resting orders placed before release
-    sidestep both.
+  - All three schedule constants shifted 5s EARLY (later 3s, later 1s)
+    relative to real release times — fixes live rejections from anchor-
+    price staleness and dynamic trade_stops_level widening at the exact
+    release moment. Resting orders placed before release sidestep both.
   - `_next_event_trigger_window()` narrowed to a HARD pre-release-only
     window — no retry after real release.
   - `_next_flatten_window()` default lead_minutes changed 5.0 -> 10.0.
@@ -349,22 +336,14 @@ CHANGE LOG (2026-08-30):
 
 CHANGE LOG (2026-08-12):
   - Re-added the unconditional final flatten check immediately before
-    order placement in check_and_place() — fixes a real live bug where
-    the window-based flatten alone silently never ran for a symbol if
-    the main loop routed it to manage_open_trade() instead during the
-    flatten window.
+    order placement in check_and_place().
   - Trimmed to 6 symbols (XAUUSDm, XAGUSDm, EURUSDm, GBPUSDm, USDJPYm,
     USDCADm).
   - FX offset/SL settled at 12/20 pips.
-  - Flatten lead time set to 5 minutes (later revised to 10, see above).
-  - Added _next_flatten_window()/_flatten_symbol(): closes ANY position
-    and cancels ANY pending order on a symbol, regardless of magic
-    number, ahead of a scheduled event — deliberate, simpler alternative
-    to hedging-mode detection/blocking.
+  - Flatten lead time set to 5 minutes (later revised to 10).
+  - Added _next_flatten_window()/_flatten_symbol().
   - Lot sizing rewritten to pull live from
-    mt5.symbol_info(symbol).trade_tick_value/trade_tick_size instead of
-    a static pip-value guess table, which had been wrong by orders of
-    magnitude for several symbols.
+    mt5.symbol_info(symbol).trade_tick_value/trade_tick_size.
 
 CHANGE LOG (2026-08-11, earlier same day):
   - Added XAGUSDm + 7 major USD pairs (later trimmed to 4).
@@ -373,8 +352,7 @@ CHANGE LOG (2026-08-11, earlier same day):
 
 CHANGE LOG (prior revision):
   - Expanded from NFP-only to three event types: NFP, CPI, FOMC.
-  - Removed the FOMC-proximity filter entirely — helped the reload
-    chain, hurt this mechanic when tested directly.
+  - Removed the FOMC-proximity filter entirely.
 
 CHANGE LOG (initial):
   - Initial build. Fourth standalone strategy, own MAGIC number, own
@@ -395,55 +373,58 @@ import MetaTrader5 as mt5
 # FOMC) — do not assume a fixed-rule pattern for any of them; the 2025
 # government shutdown proved that assumption can silently break.
 #
-# *** All timestamps below are stored 3 SECONDS EARLY relative to the real
-# release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:57).
-# The real release moment for any entry here is
-# `release_time + EARLY_ENTRY_SECONDS` (3 seconds).
+# *** All timestamps below are stored 1 SECOND EARLY relative to the real
+# release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:59).
+# Narrowed from 3s to 1s on 2026-09-12 — see CHANGE LOG. The real release
+# moment for any entry here is `release_time + EARLY_ENTRY_SECONDS` (now
+# 1 second).
 #
 # IMPORTANT: these are LITERAL, hand-typed timestamps — NOT computed from
 # EARLY_ENTRY_SECONDS. If EARLY_ENTRY_SECONDS is ever changed again, every
 # literal below must be manually re-shifted to match, or the window-open
 # time and the code's internal "real release" time drift out of sync.
+# This has happened twice before (2026-09-09, 2026-09-11) — double-check
+# every literal against its own real release time, not just the pattern.
 # ---------------------------------------------------------------------------
 
 NFP_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 10, 2, 12, 29, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 11, 6, 13, 29, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 4, 13, 29, 57, tzinfo=datetime.timezone.utc),
-    # Add next month's date here, 3s EARLY. DST-adjust by hand: 8:30 AM ET
+    datetime.datetime(2026, 10, 2, 12, 29, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 11, 6, 13, 29, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 12, 4, 13, 29, 59, tzinfo=datetime.timezone.utc),
+    # Add next month's date here, 1s EARLY. DST-adjust by hand: 8:30 AM ET
     # = 12:30:00 UTC during DST (roughly Mar-Nov), 13:30:00 UTC otherwise
-    # -> store as 12:29:57 / 13:29:57 respectively.
+    # -> store as 12:29:59 / 13:29:59 respectively.
 ]
 
 CPI_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 11, 16, 49, 57, tzinfo=datetime.timezone.utc),
-    # ^ moved here from NFP_SCHEDULE_UTC 2026-09-11 — was misfiled under NFP
-    # with the wrong time (14:29:57). Confirmed via BLS: real CPI release
-    # is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST), so 3s-early is
-    # 12:29:57, not 14:29:57. If this time has already passed by the time
-    # this file is deployed, it's a no-op (window will simply never open)
-    # and can be dropped on the next cleanup.
-    datetime.datetime(2026, 10, 14, 12, 29, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 11, 10, 13, 29, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 10, 13, 29, 57, tzinfo=datetime.timezone.utc),
-    # Same 8:30 AM ET / DST rule as NFP, stored 3s EARLY. Check
+    datetime.datetime(2026, 9, 11, 12, 29, 59, tzinfo=datetime.timezone.utc),
+    # ^ CORRECTED 2026-09-12 — was stored as 16:49:57, a stale/corrupted
+    # literal inconsistent with its own prior comment. Confirmed via BLS:
+    # real CPI release is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST),
+    # so 1s-early is 12:29:59. If this time has already passed by the
+    # time this file is deployed, it's a no-op (window will simply never
+    # open) and can be dropped on the next cleanup.
+    datetime.datetime(2026, 10, 14, 12, 29, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 11, 10, 13, 29, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 12, 10, 13, 29, 59, tzinfo=datetime.timezone.utc),
+    # Same 8:30 AM ET / DST rule as NFP, stored 1s EARLY. Check
     # bls.gov/schedule/news_release/cpi.htm
 ]
 
 FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 16, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 10, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 9, 18, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 1, 27, 18, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 3, 17, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 4, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 6, 9, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 7, 28, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 9, 15, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 10, 27, 17, 59, 57, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 12, 8, 18, 59, 57, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 9, 16, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 10, 28, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2026, 12, 9, 18, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 1, 27, 18, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 3, 17, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 4, 28, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 6, 9, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 7, 28, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 9, 15, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 10, 27, 17, 59, 59, tzinfo=datetime.timezone.utc),
+    datetime.datetime(2027, 12, 8, 18, 59, 59, tzinfo=datetime.timezone.utc),
     # Decision time is 2:00 PM ET = 18:00:00 UTC during DST, 19:00:00 UTC
-    # otherwise -> stored 3s EARLY as 17:59:57 / 18:59:57 respectively.
+    # otherwise -> stored 1s EARLY as 17:59:59 / 18:59:59 respectively.
     # All 2027 dates confirmed against the Fed's own published (tentative)
     # 2027 calendar as of 2026-09-11 — not extrapolated.
 ]
@@ -451,7 +432,9 @@ FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
 # Real release time = stored schedule time + this. Kept as a named constant
 # so every place in the file that needs to reason about the REAL moment
 # (vs. the deliberately-early stored one) references the same value.
-EARLY_ENTRY_SECONDS = 3.0
+# Narrowed 3.0 -> 1.0 on 2026-09-12 — see CHANGE LOG for the caveat about
+# this not being backtested and the missed-window risk it reintroduces.
+EARLY_ENTRY_SECONDS = 1.0
 
 # Maximum acceptable slippage (in points) on the exits THIS FILE controls
 # directly (force-close, pre-event flatten) — TRADE_ACTION_DEAL requests
@@ -465,12 +448,8 @@ EXIT_DEVIATION = 500
 
 # ---------------------------------------------------------------------------
 # Per-event-type risk sizing — added 2026-09-12. See module docstring
-# CHANGE LOG for the backtest that informed this split. NFP is sized
-# higher than CPI/FOMC based on 49 tick-validated events (Jan 2025-Sep
-# 2026), with the explicit caveat noted there: NFP's larger 2026 payoffs
-# are plausibly a market-regime effect rather than a proven structural
-# edge, and this split is a deliberately moderate choice (5%/2%) rather
-# than the most aggressive one tested.
+# CHANGE LOG for the backtest that informed this split. Flat 14% chosen
+# as an explicit final decision, not the risk-adjusted optimum tested.
 # ---------------------------------------------------------------------------
 RISK_PCT_BY_EVENT: Dict[str, float] = {
     "NFP": 14.0,
@@ -551,7 +530,7 @@ _validate_hedging_mode()
 #
 # risk_pct here is now a FALLBACK ONLY (used if an event_type isn't found
 # in RISK_PCT_BY_EVENT) — see that dict above for the actual live values
-# as of 2026-09-12 (NFP=5%, CPI=2%, FOMC=2%).
+# as of 2026-09-12 (flat 14% on all three event types).
 
 SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
     "XAUUSDm": {
@@ -577,14 +556,8 @@ SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
 
 RISK_PCT = 2.0  # fallback default only if a symbol's config is missing risk_pct
 # AND no event-type-specific value is available either.
-# History: 2026-08-12 allocation scaled from an initial 14% total to 30%.
-# 2026-08-30: +3.2143% for XCUUSDm -> 33.2143% total across 7 symbols.
-# 2026-09-04: FX pairs removed, risk_pct redistributed across XAU/XAG/XCU.
-# 2026-09-08: copper removed, XAU/XAG both set flat to 7%. 2026-09-11:
-# XAGUSDm removed; XAUUSDm went 7.0 -> 3.0 -> 33.2143 -> 2.0, all same
-# day, all explicit instructions. 2026-09-12: flat 2.0 replaced by
-# RISK_PCT_BY_EVENT (NFP=5%, CPI=2%, FOMC=2%) — see module docstring
-# CHANGE LOG.
+# History: see module docstring CHANGE LOG for the full sequence of
+# changes to this and to RISK_PCT_BY_EVENT.
 MAGIC = 20260807  # unique to this strategy — must not collide with
 # straddle_strategy.py (20260716), news_confirm_strategy.py
 # (20260801), or news_reload_strategy.py (20260810)
@@ -620,13 +593,12 @@ class NewsSpikeStrategy:
         converted to account currency by MT5. Clamps to the symbol's real
         volume_min/volume_max/volume_step.
 
-        risk_pct_override, added 2026-09-12: when provided (normally by
-        check_and_place() resolving the current event_type against
-        RISK_PCT_BY_EVENT), this takes priority over the symbol's own
-        SYMBOL_CONFIG["risk_pct"]. Falls back to SYMBOL_CONFIG's value,
-        then to the module-level RISK_PCT, only if no override is given —
-        this keeps the function usable standalone/interactively without
-        requiring an event_type."""
+        risk_pct_override: when provided (normally by check_and_place()
+        resolving the current event_type against RISK_PCT_BY_EVENT), this
+        takes priority over the symbol's own SYMBOL_CONFIG["risk_pct"].
+        Falls back to SYMBOL_CONFIG's value, then to the module-level
+        RISK_PCT, only if no override is given — this keeps the function
+        usable standalone/interactively without requiring an event_type."""
         cfg = SYMBOL_CONFIG[symbol]
         info = mt5.symbol_info(symbol)
         if info is None or not info.trade_tick_size:
@@ -689,26 +661,22 @@ class NewsSpikeStrategy:
     def has_open_position(self, symbol: str) -> bool:
         """Public, magic-filtered check for the main loop to use instead
         of a broker-wide open-trade count. Checks for ANY own open
-        position (plural-aware as of 2026-09-12) — a dual-fill can leave
-        two open at once."""
+        position — a dual-fill can leave two open at once."""
         return len(self._get_positions(symbol)) > 0
 
     def has_own_open_trade(self, symbol: str) -> bool:
         """Public, magic-filtered check for the main loop to use instead
         of a broker-wide open-trades count. Checks for ANY own open
-        position (plural-aware as of 2026-09-12) — a dual-fill can leave
-        two open at once."""
+        position — a dual-fill can leave two open at once."""
         return len(self._get_positions(symbol)) > 0
 
     def _get_position(self, symbol: str):
         """Returns a SINGLE matching position (the first one found) —
         kept for any external caller that still expects one-position
         semantics. Internally, manage_open_trade() uses _get_positions()
-        (plural) as of 2026-09-12, since a dual-fill (both straddle legs
-        filling — now an accepted, expected outcome rather than something
-        actively prevented, see CHANGE LOG) can leave TWO own positions
-        open on the same symbol at once. Do not use this method anywhere
-        that needs to guarantee every open position gets managed."""
+        (plural), since a dual-fill can leave TWO own positions open on
+        the same symbol at once. Do not use this method anywhere that
+        needs to guarantee every open position gets managed."""
         positions = mt5.positions_get(symbol=symbol)
         if not positions:
             return None
@@ -717,8 +685,7 @@ class NewsSpikeStrategy:
 
     def _get_positions(self, symbol: str) -> List[Any]:
         """Returns ALL of this strategy's own open positions on a symbol,
-        not just the first. Added 2026-09-12 alongside the removal of
-        OCO cancellation — a dual-fill now produces two simultaneous
+        not just the first — a dual-fill produces two simultaneous
         positions with this strategy's MAGIC, and both must be tracked
         and eventually force-closed independently, or one would sit open
         indefinitely with nothing ever managing it."""
@@ -780,17 +747,15 @@ class NewsSpikeStrategy:
     def _release_time_for_position(
         self, open_time: datetime.datetime
     ) -> Optional[datetime.datetime]:
-        """Added 2026-09-12. Stateless lookup of which scheduled event a
-        given open position belongs to, used by manage_open_trade() to
-        anchor the force-close deadline to the REAL RELEASE TIME rather
-        than the position's own open time (see CHANGE LOG for why this
-        matters — a late-filling leg no longer gets a fresh 60 seconds
-        of its own). Returns the most recent real release time (across
-        all three calendars) at or before `open_time`. A position should
-        only ever exist because it filled at-or-after some real release,
-        so "most recent real release <= open_time" reliably identifies
-        the event it belongs to without needing any stored event-to-
-        position mapping."""
+        """Stateless lookup of which scheduled event a given open
+        position belongs to, used by manage_open_trade() to anchor the
+        force-close deadline to the REAL RELEASE TIME rather than the
+        position's own open time. Returns the most recent real release
+        time (across all three calendars) at or before `open_time`. A
+        position should only ever exist because it filled at-or-after
+        some real release, so "most recent real release <= open_time"
+        reliably identifies the event it belongs to without needing any
+        stored event-to-position mapping."""
         candidates: List[datetime.datetime] = []
         for schedule in (NFP_SCHEDULE_UTC, CPI_SCHEDULE_UTC, FOMC_SCHEDULE_UTC):
             for release_time in schedule:
@@ -826,7 +791,7 @@ class NewsSpikeStrategy:
         unconditional final check right before order placement. Scoped
         to a SINGLE symbol (this strategy's own, XAUUSDm) — for the
         portfolio-WIDE flatten across every symbol/magic at the event
-        deadline, see _flatten_entire_account() below, added 2026-09-12."""
+        deadline, see _flatten_entire_account() below."""
         actions: List[str] = []
 
         for pos in mt5.positions_get(symbol=symbol) or ():
@@ -866,17 +831,15 @@ class NewsSpikeStrategy:
     def _next_global_flatten_deadline(
         self, now: datetime.datetime
     ) -> Optional[Tuple[datetime.datetime, str]]:
-        """Added 2026-09-12, simplified same day to a single T+60s
-        deadline (was a 2-minute window; that extra grace period was
-        removed per explicit decision — everything closes right at
-        real_release + max_hold_seconds, full stop, with only a short
-        GLOBAL_FLATTEN_RETRY_SECONDS safety margin for a rejected
-        order_send to get a couple more attempts on the same 1-second
-        cadence). Returns (real_release_time, event_type) if `now` is at
-        or just past any scheduled event's real_release_time +
-        max_hold_seconds deadline. Uses XAUUSDm's max_hold_seconds as the
-        reference hold time since that's the only symbol configured in
-        this file."""
+        """Single T+60s deadline (per explicit decision) — everything
+        closes right at real_release + max_hold_seconds, full stop, with
+        only a short GLOBAL_FLATTEN_RETRY_SECONDS safety margin for a
+        rejected order_send to get a couple more attempts on the same
+        1-second cadence. Returns (real_release_time, event_type) if
+        `now` is at or just past any scheduled event's real_release_time
+        + max_hold_seconds deadline. Uses XAUUSDm's max_hold_seconds as
+        the reference hold time since that's the only symbol configured
+        in this file."""
         hold_seconds = SYMBOL_CONFIG.get("XAUUSDm", {}).get("max_hold_seconds", 60.0)
         for event_type, schedule in (
             ("NFP", NFP_SCHEDULE_UTC),
@@ -896,18 +859,18 @@ class NewsSpikeStrategy:
         return None
 
     def _flatten_entire_account(self) -> Optional[str]:
-        """Added 2026-09-12. Closes EVERY open position and cancels
-        EVERY pending order across the WHOLE ACCOUNT — no symbol filter,
-        no magic filter. This is intentionally broader than
-        _flatten_symbol() (which only touches one symbol). See module
-        docstring CHANGE LOG for the full rationale: NFP/CPI/FOMC moves
-        the dollar broadly, so any strategy's position on any USD pair
-        is exposed to the same shared-news reversal risk gold itself is
-        being protected from at the same moment. This deliberately
-        crosses strategy boundaries (touches positions/orders opened by
-        straddle_strategy.py, MAGIC=20260716, and any other running
-        strategy) — a narrow, explicit exception to this project's usual
-        pattern of strategies never touching each other's state."""
+        """Closes EVERY open position and cancels EVERY pending order
+        across the WHOLE ACCOUNT — no symbol filter, no magic filter.
+        Intentionally broader than _flatten_symbol() (which only touches
+        one symbol). See module docstring CHANGE LOG for the full
+        rationale: NFP/CPI/FOMC moves the dollar broadly, so any
+        strategy's position on any USD pair is exposed to the same
+        shared-news reversal risk gold itself is being protected from at
+        the same moment. This deliberately crosses strategy boundaries
+        (touches positions/orders opened by straddle_strategy.py,
+        MAGIC=20260716, and any other running strategy) — a narrow,
+        explicit exception to this project's usual pattern of strategies
+        never touching each other's state."""
         actions: List[str] = []
 
         for pos in mt5.positions_get() or ():  # NO symbol filter, NO magic filter
@@ -951,12 +914,10 @@ class NewsSpikeStrategy:
         return "; ".join(actions) if actions else None
 
     def check_global_flatten(self, now: Optional[datetime.datetime] = None) -> Optional[str]:
-        """PUBLIC — added 2026-09-12, simplified same day to a single
-        T+60s deadline. Call ONCE PER POLL CYCLE from the main loop,
-        OUTSIDE the per-symbol loop (unlike manage_pending_orders()/
+        """PUBLIC. Call ONCE PER POLL CYCLE from the main loop, OUTSIDE
+        the per-symbol loop (unlike manage_pending_orders()/
         manage_open_trade()/check_and_place(), which are called once per
-        symbol). See module docstring CHANGE LOG — main_news_spike.py
-        needs a one-line addition to actually call this.
+        symbol). Confirmed wired into main_news_spike.py.
 
         Returns None (does nothing) outside the narrow band right at
         each event's real_release + max_hold_seconds deadline (plus a
@@ -982,11 +943,11 @@ class NewsSpikeStrategy:
     ) -> Dict[str, Any]:
         """Call on every poll (~1s cadence required near a scheduled event
         — a narrow entry window with slower polling risks stepping over
-        it entirely). Places the straddle in the narrow pre-release gap
-        for whichever event type (NFP/CPI/FOMC) currently has it open.
-        manage_open_trade() then handles the hard 1-minute force-close —
-        there is no TP, no reload, and no retry past the real release
-        moment.
+        it entirely, more so now at 1s early than it did at 3s). Places
+        the straddle in the narrow pre-release gap for whichever event
+        type (NFP/CPI/FOMC) currently has it open. manage_open_trade()
+        then handles the hard 1-minute force-close — there is no TP, no
+        reload, and no retry past the real release moment.
 
         `now` should be a SINGLE timestamp captured ONCE per poll cycle by
         the caller (the main loop) and passed to every symbol's call that
@@ -1052,23 +1013,23 @@ class NewsSpikeStrategy:
         buy_sl = _round_price(buy_stop - sl, symbol)
         sell_sl = _round_price(sell_stop + sl, symbol)
 
-        # Per-event-type risk_pct, added 2026-09-12 — resolved here since
-        # event_type is already known at this point in the flow, then
-        # passed explicitly into _base_lot() rather than that method
-        # reading a single fixed value off SYMBOL_CONFIG. Falls back to
-        # SYMBOL_CONFIG's risk_pct if event_type somehow isn't in
-        # RISK_PCT_BY_EVENT (shouldn't happen — _next_event_trigger_window
-        # only ever returns NFP/CPI/FOMC — but fails safe rather than
-        # raising if the calendars are ever extended with a new type).
+        # Per-event-type risk_pct — resolved here since event_type is
+        # already known at this point in the flow, then passed explicitly
+        # into _base_lot() rather than that method reading a single fixed
+        # value off SYMBOL_CONFIG. Falls back to SYMBOL_CONFIG's risk_pct
+        # if event_type somehow isn't in RISK_PCT_BY_EVENT (shouldn't
+        # happen — _next_event_trigger_window only ever returns NFP/CPI/
+        # FOMC — but fails safe rather than raising if the calendars are
+        # ever extended with a new type).
         risk_pct = RISK_PCT_BY_EVENT.get(event_type, cfg.get("risk_pct", RISK_PCT))
         lots = self._base_lot(symbol, risk_pct_override=risk_pct)
 
         # Expiration anchored to the REAL release time (release_time +
         # EARLY_ENTRY_SECONDS) plus the hold time — real_release_time +
-        # max_hold_seconds. As of 2026-09-12 this is ONE single deadline,
-        # not a separate longer expiration: if price never reaches either
-        # offset by T+60s, the order simply expires right there, same
-        # moment everything else closes. No more 5-minute lingering.
+        # max_hold_seconds. ONE single deadline, not a separate longer
+        # expiration: if price never reaches either offset by T+60s, the
+        # order simply expires right there, same moment everything else
+        # closes.
         real_release_time = release_time + datetime.timedelta(
             seconds=EARLY_ENTRY_SECONDS
         )
@@ -1129,13 +1090,12 @@ class NewsSpikeStrategy:
     # ---------------------------------------------------------------- OCO / cleanup
 
     def manage_pending_orders(self, symbol: str) -> str:
-        """As of 2026-09-12, this method NO LONGER cancels the opposite
-        order when one side fills — see CHANGE LOG. Both sides are
-        allowed to fire; if that happens, manage_open_trade() is
-        responsible for tracking and closing BOTH resulting positions
-        independently (see _get_positions()). This method's only
-        remaining job is expiring pending orders that never filled at
-        all within their window."""
+        """This method does NOT cancel the opposite order when one side
+        fills — see CHANGE LOG. Both sides are allowed to fire; if that
+        happens, manage_open_trade() is responsible for tracking and
+        closing BOTH resulting positions independently (see
+        _get_positions()). This method's only remaining job is expiring
+        pending orders that never filled at all within their window."""
         pending = self._get_pending_orders(symbol)
         if pending["buy"] is None and pending["sell"] is None:
             return "No pending straddle"
@@ -1158,18 +1118,18 @@ class NewsSpikeStrategy:
     # ---------------------------------------------------------------- trade management
 
     def _correct_sl_for_slippage(self, symbol: str, position) -> Optional[str]:
-        """Added 2026-09-12. Pending stop orders can fill at a worse
-        price than the intended trigger level during a fast news
-        cascade (ENTRY slippage — distinct from SL-fill slippage, see
-        module docstring's documented ~$40 worst-case example, which is
-        about the SL itself slipping when triggered, not this). The SL
-        submitted at order-placement time is a FIXED PRICE calculated
-        from the INTENDED trigger level, not the eventual real fill
-        price — so if entry slips, that SL is now the wrong distance
-        from where the trade actually opened. Since slippage on entry
-        pushes price AWAY from a SL that didn't move with it, this
-        widens the realized risk distance beyond what risk_pct was
-        sized for, every time entry slips against the position.
+        """Pending stop orders can fill at a worse price than the
+        intended trigger level during a fast news cascade (ENTRY
+        slippage — distinct from SL-fill slippage, see module docstring's
+        documented ~$40 worst-case example, which is about the SL itself
+        slipping when triggered, not this). The SL submitted at order-
+        placement time is a FIXED PRICE calculated from the INTENDED
+        trigger level, not the eventual real fill price — so if entry
+        slips, that SL is now the wrong distance from where the trade
+        actually opened. Since slippage on entry pushes price AWAY from a
+        SL that didn't move with it, this widens the realized risk
+        distance beyond what risk_pct was sized for, every time entry
+        slips against the position.
 
         This corrects that: re-anchors the SL to position.price_open
         (the REAL fill price) +/- cfg["sl"], the instant a position is
@@ -1215,23 +1175,22 @@ class NewsSpikeStrategy:
 
     def manage_open_trade(self, symbol: str) -> str:
         """Call on every poll while a position (or positions — see below)
-        is open. As of 2026-09-12, this checks and manages ALL of this
-        strategy's own open positions on the symbol independently, not
-        just one — necessary because OCO cancellation was removed
-        (manage_pending_orders() no longer cancels the opposite order on
-        a fill), so a dual-fill can leave TWO positions open at once, and
-        both must be tracked or one would sit open indefinitely.
+        is open. Checks and manages ALL of this strategy's own open
+        positions on the symbol independently, not just one — necessary
+        because OCO cancellation was removed (manage_pending_orders() no
+        longer cancels the opposite order on a fill), so a dual-fill can
+        leave TWO positions open at once, and both must be tracked or one
+        would sit open indefinitely.
 
-        The deadline for each position is now RELEASE-ANCHORED, not
-        entry-anchored: real_release_time + max_hold_seconds, the SAME
-        fixed moment for every position tied to a given event regardless
-        of when that specific position actually filled. A late-filling
-        leg gets whatever time is left until that shared deadline, not a
-        fresh max_hold_seconds of its own — see CHANGE LOG for the
-        backtested cost/benefit of this vs. the prior entry-anchored
-        rule. Falls back to entry-anchored timing (this position's own
-        open time + max_hold_seconds) only if the release time can't be
-        determined at all, which should not happen in normal operation."""
+        The deadline for each position is RELEASE-ANCHORED, not entry-
+        anchored: real_release_time + max_hold_seconds, the SAME fixed
+        moment for every position tied to a given event regardless of
+        when that specific position actually filled. A late-filling leg
+        gets whatever time is left until that shared deadline, not a
+        fresh max_hold_seconds of its own. Falls back to entry-anchored
+        timing (this position's own open time + max_hold_seconds) only
+        if the release time can't be determined at all, which should not
+        happen in normal operation."""
         positions = self._get_positions(symbol)
         if not positions:
             return "No open trade"
@@ -1391,15 +1350,13 @@ if __name__ == "__main__":
         )
     print()
     print("*** XAUUSDm backed by real, control-tested 1-min data + tick-level re-validation (49 events, Jan 2025-Sep 2026) ***")
-    print(f"*** risk_pct is FLAT 14% on all event types as of 2026-09-12: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest and drawdown behind this decision (-37.0% max drawdown on the 49-event historical sequence) ***")
+    print(f"*** risk_pct is FLAT 14% on all event types: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest and drawdown behind this decision (-37.0% max drawdown on the 49-event historical sequence) ***")
     print("*** XAGUSDm removed 2026-09-11, copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
     print(
-        f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after ***"
+        f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after -- NARROWED to 1s on 2026-09-12, NOT independently backtested, see CHANGE LOG ***"
     )
     print(
         "*** GLOBAL FLATTEN: at release+60s, EVERY position/order on the WHOLE ACCOUNT "
-        "closes/cancels, not just this strategy's own gold trades — REQUIRES "
-        "main_news_spike.py to call check_global_flatten(now) once per cycle, "
-        "see CHANGE LOG ***"
+        "closes/cancels, not just this strategy's own gold trades ***"
     )
     print("*** Still DEMO ONLY — do not run any of this on real money ***")
