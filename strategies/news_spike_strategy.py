@@ -472,8 +472,6 @@ CPI_SCHEDULE_UTC: List[datetime.datetime] = [
 ]
 
 FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 14, 18, 29, 59, tzinfo=datetime.timezone.utc),
-
     # NOTE: a "#test" entry (2026-09-14 17:39:59 UTC) was removed here
     # 2026-09-14 — it had been added directly to this live list and fired
     # for real on the live account. See the module-level warning above.
