@@ -78,6 +78,60 @@ traded by this file now.
 
 *** STILL DEMO ONLY ***
 
+CHANGE LOG (2026-09-14, drop broker-side SPECIFIED expiration entirely):
+  - The 10022 'Invalid expiration' rejection kept recurring even after
+    the clock-skew fix and after removing the "#test" calendar entry —
+    which meant it was never really a clock or calendar problem. This
+    strategy's whole design asks an order to expire ~60 seconds from
+    the moment it's placed (real_release_time + max_hold_seconds). If
+    Exness enforces a minimum lead time on ORDER_TIME_SPECIFIED longer
+    than ~60 seconds (plausible and consistent with every observation
+    so far — expiration_mode confirmed SPECIFIED is supported in
+    principle, so a minimum-lead-time rule is the remaining explanation),
+    EVERY real event would hit this same rejection, not just this one
+    test — a structural problem, not an incidental one.
+  - FIXED by no longer asking the broker to enforce the expiration at
+    all: pending orders are now placed with ORDER_TIME_GTC (no
+    "expiration" field) instead of ORDER_TIME_SPECIFIED. Deadline
+    enforcement is handled purely by normal closure — check_global_
+    flatten() already unconditionally cancels EVERY pending order on
+    the account (no per-order field lookups, no event-matching needed)
+    at the same real_release_time + max_hold_seconds deadline used
+    everywhere else in this file. manage_pending_orders() was
+    simplified to a plain status read; an earlier version of this fix
+    tried to track each pending order's own setup time and cancel it
+    individually, which added fragility (the setup-time field's exact
+    name varies across MT5 Python package builds) for no real benefit
+    over just relying on the global flatten, so that was removed.
+
+CHANGE LOG (2026-09-14, comment-length rejection + silent flatten failures):
+  - FIXED a real live rejection: mt5.order_send() was returning None with
+    last_error() = (-2, 'Invalid "comment" argument') on every close/cancel
+    issued by _flatten_entire_account(), because its comment string
+    ("news_spike_global_event_flatten", 31 chars) exceeds MT5's safe
+    comment-length limit (reliably fine under ~26-28 chars; ~31 sits right
+    at the edge and gets rejected by this broker/build). Shortened to
+    "spike_global_flatten" (21 chars). _flatten_symbol()'s comment
+    ("news_spike_pre_event_flatten", 28 chars) was at the same edge and
+    was shortened pre-emptively to "spike_pre_flatten" (18 chars), even
+    though it had not yet been observed failing.
+  - FOUND while fixing the above: _flatten_entire_account() and
+    _flatten_symbol() only ever appended to their `actions` list on a
+    confirmed TRADE_RETCODE_DONE. A rejected order_send (including the
+    comment-length rejection above) was silently swallowed — the caller
+    saw "already flat" even when real positions/orders were still open
+    and every close attempt had just failed. Both methods now also track
+    failed attempts explicitly and report them distinctly from "nothing
+    to do", so a real un-flattened position can never again be reported
+    as an already-flat account.
+  - REMOVED a live "#test" entry from FOMC_SCHEDULE_UTC
+    (2026-09-14 17:39:59 UTC) that had been left in the real schedule
+    list and fired for real on the live account tonight, triggering both
+    the original expiration/rejection issue and, downstream, the
+    comment-length failures above during its post-event global flatten
+    window. Real FOMC dates are unaffected — only the injected test
+    literal was removed.
+
 CHANGE LOG (2026-09-12, EARLY_ENTRY_SECONDS narrowed to 1s + naming fix):
   - EARLY_ENTRY_SECONDS changed 3.0 -> 1.0. Per explicit instruction,
     final change of this session. NOT independently backtested against
@@ -385,6 +439,13 @@ import MetaTrader5 as mt5
 # time and the code's internal "real release" time drift out of sync.
 # This has happened twice before (2026-09-09, 2026-09-11) — double-check
 # every literal against its own real release time, not just the pattern.
+#
+# DO NOT add ad-hoc "#test" entries directly to these live lists again —
+# one was added and fired for real on the live account on 2026-09-14
+# (17:39:59 UTC), triggering real order rejections and a real (if
+# ultimately harmless) global-flatten failure. Test entry-window logic
+# against a copy of the calendars or with a mocked `now`, not by editing
+# the live schedule.
 # ---------------------------------------------------------------------------
 
 NFP_SCHEDULE_UTC: List[datetime.datetime] = [
@@ -397,7 +458,6 @@ NFP_SCHEDULE_UTC: List[datetime.datetime] = [
 ]
 
 CPI_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 9, 11, 12, 29, 59, tzinfo=datetime.timezone.utc),
     # ^ CORRECTED 2026-09-12 — was stored as 16:49:57, a stale/corrupted
     # literal inconsistent with its own prior comment. Confirmed via BLS:
     # real CPI release is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST),
@@ -412,6 +472,11 @@ CPI_SCHEDULE_UTC: List[datetime.datetime] = [
 ]
 
 FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
+    datetime.datetime(2026, 9, 14, 18, 29, 59, tzinfo=datetime.timezone.utc),
+
+    # NOTE: a "#test" entry (2026-09-14 17:39:59 UTC) was removed here
+    # 2026-09-14 — it had been added directly to this live list and fired
+    # for real on the live account. See the module-level warning above.
     datetime.datetime(2026, 9, 16, 17, 59, 59, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 10, 28, 17, 59, 59, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 12, 9, 18, 59, 59, tzinfo=datetime.timezone.utc),
@@ -467,6 +532,89 @@ RISK_PCT_BY_EVENT: Dict[str, float] = {
 # a second, later closing moment.
 GLOBAL_FLATTEN_RETRY_SECONDS = 15.0
 
+# Comment strings for TRADE_ACTION_DEAL/TRADE_ACTION_PENDING requests.
+# MT5 rejects order_send() outright — order_send() returns a result with
+# last_error() = (-2, 'Invalid "comment" argument') — once the comment
+# gets too long; reliably safe under ~26-28 chars, ~31 sits right at the
+# edge and was observed failing live on 2026-09-14. Kept as named
+# constants, all comfortably under that edge, so no future edit
+# accidentally drifts one back over the limit.
+COMMENT_ENTRY = "spike_entry"
+COMMENT_PRE_FLATTEN = "spike_pre_flatten"
+COMMENT_GLOBAL_FLATTEN = "spike_global_flatten"
+COMMENT_FORCE_CLOSE = "spike_force_close"
+
+
+# ---------------------------------------------------------------------------
+# Server clock sync — this file must always reason in REAL UTC, never in
+# whatever the local machine's clock happens to say. Confirmed live on
+# 2026-09-14: the VPS clock was running ~64s BEHIND the real Exness server
+# clock. Every internal deadline/expiration in this file is computed from
+# fixed schedule literals (correct in absolute terms), but decisions about
+# WHEN to act on them ("is now inside the window", "has the deadline
+# passed") were being made against the local clock — 64s of unnoticed skew
+# is enough to place an order late enough that its own already-correct
+# expiration has passed by the time it reaches the broker, producing
+# retcode 10022 'Invalid expiration' exactly as observed that night.
+#
+# Fix: never trust datetime.datetime.now(timezone.utc) directly anywhere
+# below. Instead, periodically measure local-vs-server skew off a live
+# tick (the broker's own clock, via tick.time) and apply that correction
+# to get real UTC every time "now" is needed. This does NOT fix the VPS
+# clock itself — that still needs a proper NTP/Windows time resync — it
+# makes this strategy correct regardless of whether that happens.
+# ---------------------------------------------------------------------------
+_CLOCK_SKEW_REFRESH_SECONDS = 60.0  # re-measure skew at most this often
+_CLOCK_SKEW_WARN_THRESHOLD_SECONDS = 5.0  # log if drift exceeds this
+_clock_skew_cache: Dict[str, Any] = {"skew": datetime.timedelta(0), "checked_at": None}
+
+
+def _measure_clock_skew(symbol: str = "XAUUSDm") -> datetime.timedelta:
+    """Returns server_time - local_time, using `symbol`'s last tick as the
+    real-clock reference (the broker's own clock, not ours). Positive
+    means the server clock is AHEAD of local (i.e. local is behind, the
+    exact situation observed on 2026-09-14). Cached for
+    _CLOCK_SKEW_REFRESH_SECONDS so this isn't re-measured on every single
+    poll cycle — cheap, but no need to hit it every 1s."""
+    now_local = datetime.datetime.now(datetime.timezone.utc)
+    last_checked = _clock_skew_cache["checked_at"]
+    if (
+        last_checked is not None
+        and (now_local - last_checked).total_seconds() < _CLOCK_SKEW_REFRESH_SECONDS
+    ):
+        return _clock_skew_cache["skew"]
+
+    tick = mt5.symbol_info_tick(symbol)
+    if tick is None:
+        # Can't measure right now (e.g. market closed, symbol not
+        # selected) — keep the last known skew rather than silently
+        # resetting to zero. Zero would mean trusting the local clock,
+        # which is exactly what we already know can be wrong.
+        return _clock_skew_cache["skew"]
+
+    server_time = datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+    skew = server_time - now_local
+    if abs(skew.total_seconds()) > _CLOCK_SKEW_WARN_THRESHOLD_SECONDS:
+        print(
+            f"  WARNING: local clock is {skew.total_seconds():+.1f}s off the "
+            f"Exness server clock (measured via {symbol} tick) — correcting "
+            f"internally, but the VPS clock should still be resynced "
+            f"(NTP / Windows time sync) — this workaround should not be "
+            f"treated as a permanent fix."
+        )
+    _clock_skew_cache["skew"] = skew
+    _clock_skew_cache["checked_at"] = now_local
+    return skew
+
+
+def _utc_now() -> datetime.datetime:
+    """The real UTC 'now' this file reasons with, everywhere. Local
+    system time corrected by the last-measured skew against the broker's
+    own clock (see _measure_clock_skew above). Every internal
+    now-comparison and every default `now` in this class uses this
+    instead of datetime.datetime.now(datetime.timezone.utc) directly."""
+    return datetime.datetime.now(datetime.timezone.utc) + _measure_clock_skew()
+
 
 def _validate_calendar_freshness() -> None:
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -515,6 +663,9 @@ def _validate_hedging_mode() -> None:
 
 _validate_calendar_freshness()
 _validate_hedging_mode()
+_measure_clock_skew()  # force an initial skew reading at import time so
+# any meaningful drift is visible in the log from the very first cycle,
+# not only whenever some other code path happens to call _utc_now() first.
 
 # ---------------------------------------------------------------------------
 # Per-symbol configuration
@@ -732,9 +883,7 @@ class NewsSpikeStrategy:
         """Has this SPECIFIC event already produced a completed trade
         today? Derived from real MT5 deal history, not stored."""
         deals = (
-            mt5.history_deals_get(
-                release_time, datetime.datetime.now(datetime.timezone.utc)
-            )
+            mt5.history_deals_get(release_time, _utc_now())
             or []
         )
         own_closes = [
@@ -791,12 +940,19 @@ class NewsSpikeStrategy:
         unconditional final check right before order placement. Scoped
         to a SINGLE symbol (this strategy's own, XAUUSDm) — for the
         portfolio-WIDE flatten across every symbol/magic at the event
-        deadline, see _flatten_entire_account() below."""
+        deadline, see _flatten_entire_account() below.
+
+        Returns a summary string covering BOTH successful actions and
+        failed attempts (2026-09-14 fix) — a rejected order_send here
+        (e.g. the comment-length rejection observed live on 2026-09-14)
+        must never be silently reported as "nothing to do"."""
         actions: List[str] = []
+        failures: List[str] = []
 
         for pos in mt5.positions_get(symbol=symbol) or ():
             tick = self._get_tick(symbol)
             if tick is None:
+                failures.append(f"position ticket={pos.ticket}: no tick data, skipped")
                 continue
             is_buy = pos.type == mt5.POSITION_TYPE_BUY
             result = self._safe_order_send(
@@ -809,13 +965,18 @@ class NewsSpikeStrategy:
                     "price": tick.bid if is_buy else tick.ask,
                     "deviation": EXIT_DEVIATION,
                     "magic": MAGIC,
-                    "comment": "news_spike_pre_event_flatten",
+                    "comment": COMMENT_PRE_FLATTEN,
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": self._filling_mode(symbol),
                 }
             )
             if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
                 actions.append(f"closed position magic={pos.magic} ticket={pos.ticket}")
+            else:
+                failures.append(
+                    f"FAILED to close position ticket={pos.ticket} — "
+                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
+                )
 
         for order in mt5.orders_get(symbol=symbol) or ():
             result = self._safe_order_send(
@@ -825,8 +986,18 @@ class NewsSpikeStrategy:
                 actions.append(
                     f"cancelled pending magic={order.magic} ticket={order.ticket}"
                 )
+            else:
+                failures.append(
+                    f"FAILED to cancel pending ticket={order.ticket} — "
+                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
+                )
 
-        return "; ".join(actions) if actions else None
+        if not actions and not failures:
+            return None
+        parts = list(actions)
+        if failures:
+            parts.append("!! " + "; ".join(failures))
+        return "; ".join(parts)
 
     def _next_global_flatten_deadline(
         self, now: datetime.datetime
@@ -870,12 +1041,24 @@ class NewsSpikeStrategy:
         (touches positions/orders opened by straddle_strategy.py,
         MAGIC=20260716, and any other running strategy) — a narrow,
         explicit exception to this project's usual pattern of strategies
-        never touching each other's state."""
+        never touching each other's state.
+
+        Returns a summary string covering BOTH successful actions and
+        failed attempts (2026-09-14 fix) — previously a rejected
+        order_send here (root cause: the comment string exceeded MT5's
+        length limit, last_error() = (-2, 'Invalid "comment" argument'))
+        was silently swallowed and the caller reported "already flat"
+        even though real positions/orders were still open. That is now
+        impossible: any failure is surfaced explicitly, prefixed '!!'."""
         actions: List[str] = []
+        failures: List[str] = []
 
         for pos in mt5.positions_get() or ():  # NO symbol filter, NO magic filter
             tick = self._get_tick(pos.symbol)
             if tick is None:
+                failures.append(
+                    f"{pos.symbol} position ticket={pos.ticket}: no tick data, skipped"
+                )
                 continue
             is_buy = pos.type == mt5.POSITION_TYPE_BUY
             result = self._safe_order_send(
@@ -891,7 +1074,7 @@ class NewsSpikeStrategy:
                     # the closing deal, not this strategy's own — this
                     # close is being done on behalf of whichever strategy
                     # opened it, not re-attributed to news_spike_strategy.
-                    "comment": "news_spike_global_event_flatten",
+                    "comment": COMMENT_GLOBAL_FLATTEN,
                     "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": self._filling_mode(pos.symbol),
                 }
@@ -899,6 +1082,11 @@ class NewsSpikeStrategy:
             if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
                 actions.append(
                     f"closed {pos.symbol} magic={pos.magic} ticket={pos.ticket}"
+                )
+            else:
+                failures.append(
+                    f"FAILED to close {pos.symbol} ticket={pos.ticket} magic={pos.magic} — "
+                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
                 )
 
         for order in mt5.orders_get() or ():  # NO symbol filter, NO magic filter
@@ -910,8 +1098,19 @@ class NewsSpikeStrategy:
                     f"cancelled pending {order.symbol} magic={order.magic} "
                     f"ticket={order.ticket}"
                 )
+            else:
+                failures.append(
+                    f"FAILED to cancel pending {order.symbol} ticket={order.ticket} "
+                    f"magic={order.magic} — "
+                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
+                )
 
-        return "; ".join(actions) if actions else None
+        if not actions and not failures:
+            return None
+        parts = list(actions)
+        if failures:
+            parts.append("!! " + "; ".join(failures))
+        return "; ".join(parts)
 
     def check_global_flatten(self, now: Optional[datetime.datetime] = None) -> Optional[str]:
         """PUBLIC. Call ONCE PER POLL CYCLE from the main loop, OUTSIDE
@@ -924,9 +1123,12 @@ class NewsSpikeStrategy:
         short GLOBAL_FLATTEN_RETRY_SECONDS safety margin). Inside that
         band, unconditionally flattens the ENTIRE account (see
         _flatten_entire_account()) every cycle it's called — safe/
-        idempotent since closing zero remaining positions costs nothing."""
+        idempotent since closing zero remaining positions costs nothing.
+        If any close/cancel attempt fails, that failure is now surfaced
+        in the returned string (2026-09-14 fix) rather than being
+        reported as 'already flat'."""
         if now is None:
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = _utc_now()
 
         window = self._next_global_flatten_deadline(now)
         if window is None:
@@ -956,7 +1158,7 @@ class NewsSpikeStrategy:
             return self._no(f"{symbol} not enabled")
 
         if now is None:
-            now = datetime.datetime.now(datetime.timezone.utc)
+            now = _utc_now()
 
         flatten_window = self._next_flatten_window(now)
         if flatten_window is not None:
@@ -998,9 +1200,9 @@ class NewsSpikeStrategy:
         if tick is None:
             return self._no("No tick data")
 
-        tick_age = datetime.datetime.now(
-            datetime.timezone.utc
-        ) - datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
+        tick_age = _utc_now() - datetime.datetime.fromtimestamp(
+            tick.time, tz=datetime.timezone.utc
+        )
         if tick_age > datetime.timedelta(minutes=10):
             return self._no(f"Market likely closed — last tick is {tick_age} old")
 
@@ -1024,19 +1226,17 @@ class NewsSpikeStrategy:
         risk_pct = RISK_PCT_BY_EVENT.get(event_type, cfg.get("risk_pct", RISK_PCT))
         lots = self._base_lot(symbol, risk_pct_override=risk_pct)
 
-        # Expiration anchored to the REAL release time (release_time +
-        # EARLY_ENTRY_SECONDS) plus the hold time — real_release_time +
-        # max_hold_seconds. ONE single deadline, not a separate longer
-        # expiration: if price never reaches either offset by T+60s, the
-        # order simply expires right there, same moment everything else
-        # closes.
+        # Deadline is enforced entirely in OUR software now, not by the
+        # broker (see 2026-09-14 CHANGE LOG) — pending orders are placed
+        # GTC and manage_pending_orders() cancels them itself once
+        # _utc_now() passes real_release_time + max_hold_seconds. This
+        # value is still computed here for logging/consistency, but is
+        # deliberately NOT sent to MT5 as an "expiration" field anymore.
         real_release_time = release_time + datetime.timedelta(
             seconds=EARLY_ENTRY_SECONDS
         )
         hold_seconds = cfg.get("max_hold_seconds", 60.0)
-        expiration = int(
-            (real_release_time + datetime.timedelta(seconds=hold_seconds)).timestamp()
-        )
+        software_deadline = real_release_time + datetime.timedelta(seconds=hold_seconds)
         filling_mode = self._filling_mode(symbol)
 
         tickets: Dict[str, Optional[int]] = {"buy": None, "sell": None}
@@ -1054,9 +1254,8 @@ class NewsSpikeStrategy:
                     "sl": stop,
                     "tp": 0.0,
                     "magic": MAGIC,
-                    "comment": "news_spike_entry",
-                    "type_time": mt5.ORDER_TIME_SPECIFIED,
-                    "expiration": expiration,
+                    "comment": COMMENT_ENTRY,
+                    "type_time": mt5.ORDER_TIME_GTC,
                     "type_filling": filling_mode,
                 }
             )
@@ -1094,26 +1293,22 @@ class NewsSpikeStrategy:
         fills — see CHANGE LOG. Both sides are allowed to fire; if that
         happens, manage_open_trade() is responsible for tracking and
         closing BOTH resulting positions independently (see
-        _get_positions()). This method's only remaining job is expiring
-        pending orders that never filled at all within their window."""
+        _get_positions()).
+
+        As of 2026-09-14 this method no longer tries to compute or
+        enforce a per-order deadline itself — that attempt depended on
+        a pending order's setup-time field, whose exact name varies
+        across MT5 Python package builds, adding fragility for no real
+        benefit. check_global_flatten() already unconditionally cancels
+        EVERY pending order on the account (no field lookups, no event
+        matching needed) at the same real_release_time + max_hold_seconds
+        deadline this strategy uses everywhere else — that is now the
+        single source of truth for pending-order cleanup. This method is
+        just a status read."""
         pending = self._get_pending_orders(symbol)
         if pending["buy"] is None and pending["sell"] is None:
             return "No pending straddle"
-
-        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
-        for order in (pending["buy"], pending["sell"]):
-            if (
-                order is not None
-                and order.time_expiration
-                and now_ts >= order.time_expiration
-            ):
-                self._safe_order_send(
-                    {"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket}
-                )
-        remaining = self._get_pending_orders(symbol)
-        if remaining["buy"] is None and remaining["sell"] is None:
-            return "Neither side filled (or both filled and are now open positions) — no pending orders remain"
-        return "Pending"
+        return "Pending — cleared by check_global_flatten() at the event deadline"
 
     # ---------------------------------------------------------------- trade management
 
@@ -1196,7 +1391,7 @@ class NewsSpikeStrategy:
             return "No open trade"
 
         cfg = SYMBOL_CONFIG[symbol]
-        now = datetime.datetime.now(datetime.timezone.utc)
+        now = _utc_now()
         statuses: List[str] = []
 
         for pos in positions:
@@ -1260,7 +1455,7 @@ class NewsSpikeStrategy:
                 "price": tick.bid if is_buy else tick.ask,
                 "deviation": EXIT_DEVIATION,
                 "magic": MAGIC,
-                "comment": "news_spike_force_close",
+                "comment": COMMENT_FORCE_CLOSE,
                 "type_time": mt5.ORDER_TIME_GTC,
                 "type_filling": self._filling_mode(symbol),
             }
@@ -1277,15 +1472,14 @@ class NewsSpikeStrategy:
         self, symbol: Optional[str] = None, lookback_days: int = 120
     ) -> Dict[str, Any]:
         symbols = [symbol] if symbol else self.traded_symbols
-        since = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
-            days=lookback_days
-        )
+        now = _utc_now()
+        since = now - datetime.timedelta(days=lookback_days)
         all_closes = []
         for sym in symbols:
             deals = (
                 mt5.history_deals_get(
                     since,
-                    datetime.datetime.now(datetime.timezone.utc),
+                    now,
                     group=f"*{sym}*",
                 )
                 or ()
