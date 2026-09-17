@@ -9,7 +9,6 @@ from strategies.news_spike_strategy import (
     EARLY_ENTRY_SECONDS,
     GLOBAL_FLATTEN_RETRY_SECONDS,
     SYMBOL_CONFIG,
-    _utc_now,
 )
 from datetime import datetime, timezone, timedelta
 import os
@@ -34,9 +33,9 @@ def reload_decouple():
 # Dynamic polling (added 2026-09-04, simplified 2026-09-12)
 # ---------------------------------------------------------------------------
 # news_spike_strategy.py's entry window is only EARLY_ENTRY_SECONDS (now
-# 2s, widened from 1s on 2026-09-16 -- see that file's own CHANGE LOG)
-# wide. At a flat 30s cadence, a poll cycle can step clean over that
-# window without ever checking inside it, silently losing the event.
+# 1s, narrowed from 3s -- see that file's own CHANGE LOG) wide. At a flat
+# 30s cadence, a poll cycle can step clean over that window without ever
+# checking inside it, silently losing the event.
 #
 # Tight 1-second polling runs CONTINUOUSLY from TIGHT_BAND_MINUTES before
 # each real release through max_hold_seconds + GLOBAL_FLATTEN_RETRY_
@@ -152,26 +151,7 @@ def main():
         # checked this cycle are now judged against the exact same
         # instant, regardless of loop position or how long earlier symbols
         # took.
-        #
-        # REAL BUG FIXED 2026-09-16: this used to be
-        # datetime.now(timezone.utc) -- the RAW, uncorrected local clock.
-        # manage_open_trade() (called per-symbol below) always uses
-        # news_spike_strategy.py's own _utc_now(), which applies the
-        # measured local-vs-broker clock skew correction (see that file's
-        # "Server clock sync" section -- built specifically after the
-        # 2026-09-14 incident where a ~64s-behind VPS clock caused live
-        # order rejections). Every OTHER call in this loop
-        # (check_and_place, check_global_flatten, and event_countdown)
-        # was silently using the UNCORRECTED clock instead, defeating
-        # that protection for everything except manage_open_trade().
-        # Observed live: the same ticket's deadline countdown showed 20s
-        # remaining via event_countdown() (uncorrected clock) and 0s
-        # remaining via manage_open_trade() (corrected clock) in the SAME
-        # cycle -- a ~20s real skew, same class of drift as 2026-09-14,
-        # just a different magnitude. Fixed by using the SAME
-        # skew-corrected _utc_now() everywhere in this loop, matching
-        # manage_open_trade()'s clock exactly.
-        now = _utc_now()
+        now = datetime.now(timezone.utc)
 
         print("=" * 55)
         print(f"{now.strftime('%A %d %B %Y — %H:%M:%S UTC')}")
@@ -200,16 +180,6 @@ def main():
 
             signal = strategy.check_and_place(symbol, now)
             print(f"   {signal['reason']}")
-
-        # ── Event countdown (informational only) ────────────────────────
-        # Purely a display of the same release+60s deadline that
-        # manage_open_trade()/check_global_flatten() already enforce on
-        # their own — printed once per cycle regardless of whether a
-        # trade actually exists, so the countdown is visible even if
-        # nothing filled this event. Does NOT affect trading logic.
-        countdown = strategy.event_countdown(now)
-        if countdown:
-            print(f"\n{countdown}")
 
         # ── Portfolio-wide global flatten ────────────────────────────────
         # Called ONCE PER CYCLE, OUTSIDE the per-symbol loop above --

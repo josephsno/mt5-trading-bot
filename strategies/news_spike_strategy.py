@@ -50,13 +50,12 @@ Sizing : FLAT 14% risk_pct on ALL event types (NFP, CPI, FOMC) as of
 Filter : NONE — tested and removed for this mechanic specifically.
 
 Entry window : Every date in the three schedule constants below is
-         stored 2 SECONDS EARLY relative to the real, source-verified
-         release time (widened from 1s to 2s on 2026-09-16, explicit
-         instruction, not backtested — see CHANGE LOG). The entry window
-         opens at the stored (early) time and closes hard AT the real
-         release. If a straddle has not been placed by the real release
-         moment, that symbol sits out the event entirely — no retry
-         after price has already moved.
+         stored 1 SECOND EARLY relative to the real, source-verified
+         release time (narrowed from 3s to 1s on 2026-09-12, see CHANGE
+         LOG). The entry window opens at the stored (early) time and
+         closes hard AT the real release. If a straddle has not been
+         placed by the real release moment, that symbol sits out the
+         event entirely — no retry after price has already moved.
 
 *** VALIDATED EVIDENCE — XAUUSDm ONLY ***
 XAUUSDm is backed by real, minute-level, control-tested backtest data
@@ -79,46 +78,34 @@ traded by this file now.
 
 *** STILL DEMO ONLY ***
 
-CHANGE LOG (2026-09-16, real bug: fast pre-release fill misattributed to a stale event):
-  - FOUND AND FIXED a real bug in _release_time_for_position(), caught
-    live via a test dummy FOMC entry: the function matched a position to
-    an event using `real_release <= open_time`. This silently assumes a
-    position's fill always happens AT OR AFTER that event's real
-    release. But a pending stop order is placed the instant the entry
-    window OPENS (the stored, early release_time) and can fill any time
-    after that — including BEFORE real_release, if price reaches the
-    offset that fast. When that happened, the correct event failed the
-    `real_release <= open_time` check (real_release > open_time) and the
-    function fell back to whichever OLDER event it could still match —
-    giving a deadline already in the past and an instant, wrong
-    force-close (observed: closed after 42s against a genuine 60s hold,
-    misattributed to a stale earlier event). FIXED by matching on the
-    STORED (early) release_time instead (`release_time <= open_time`) —
-    the true earliest moment a position for that event could exist — while
-    the deadline calculation itself still anchors to real_release,
-    unchanged.
-  - This is a live-relevant risk, not just a test artifact: gold can
-    move enough in under EARLY_ENTRY_SECONDS to trigger a stop before
-    the nominal "real release" moment, especially now that
-    EARLY_ENTRY_SECONDS is 2s instead of 1s (more window for a fast fill
-    to land early). Not independently backtested against tick data —
-    this is a correctness fix, not a re-tuned parameter — but worth
-    watching the next live event closely given it was never caught
-    before today.
+CHANGE LOG (2026-09-17, EARLY_ENTRY_SECONDS 1s -> 2s):
+  - EARLY_ENTRY_SECONDS changed 1.0 -> 2.0. All three schedule constants
+    (NFP/CPI/FOMC_SCHEDULE_UTC) manually re-shifted from :59 to :58
+    seconds to match. NOT independently backtested at this value, same
+    as the 3s->1s change on 2026-09-12.
 
-CHANGE LOG (2026-09-16, EARLY_ENTRY_SECONDS widened to 2s):
-  - EARLY_ENTRY_SECONDS changed 1.0 -> 2.0. Explicit instruction, NOT
-    backtested against tick data — same caveat as every prior change to
-    this constant (see the 2026-09-09 and 2026-09-12 entries below: a
-    wider pre-release window does not reduce slippage, it only lowers
-    the odds a poll cycle steps over the window and misses the entry —
-    the opposite direction of that trade-off from the 3s->1s narrowing).
-  - ALL THREE schedule constants (NFP/CPI/FOMC_SCHEDULE_UTC) manually
-    re-shifted from 1s-early to 2s-early to match (:59 -> :58 seconds
-    field throughout), per this file's own standing rule that these are
-    hand-typed literals, not computed from EARLY_ENTRY_SECONDS. Every
-    literal was individually re-derived from its real release time, not
-    just pattern-shifted.
+CHANGE LOG (2026-09-17, remove per-position release-anchored close):
+  - REMOVED the separate per-position force-close logic that used to run
+    inside manage_open_trade() (deadline computed via
+    _release_time_for_position() + cfg["max_hold_seconds"], closed via
+    _close_position_at_market()). It was a second, independent path to
+    the exact same deadline check_global_flatten() already enforces
+    (real_release_time + max_hold_seconds, portfolio-wide) — redundant,
+    and a second place a timing bug could hide. Per explicit decision:
+    closing this strategy's own XAUUSDm positions is now handled
+    entirely by check_global_flatten(), same as pending-order cleanup
+    already was (see the 2026-09-14 CHANGE LOG entry that made
+    manage_pending_orders() a pure status read for the same reason).
+    manage_open_trade() now only corrects SL for entry slippage and
+    reports status — it no longer computes a deadline or calls
+    _close_position_at_market() itself.
+  - REMOVED _release_time_for_position() and _close_position_at_market()
+    entirely — both were only ever called from the removed logic above,
+    now dead code.
+  - IMPORTANT: check_global_flatten() must still be called once per poll
+    cycle, outside the per-symbol loop, or nothing will close these
+    positions at all — this file does not change that requirement, it
+    only removes the redundant second mechanism.
 
 CHANGE LOG (2026-09-14, drop broker-side SPECIFIED expiration entirely):
   - The 10022 'Invalid expiration' rejection kept recurring even after
@@ -360,6 +347,9 @@ CHANGE LOG (2026-09-12, OCO cancellation removed + release-anchored close):
     given position belongs to (the most recent real release at or before
     the position's own open time) — stateless, same pattern as
     everything else in this file, no stored event-to-position mapping.
+    *** REMOVED 2026-09-17 *** — see the top CHANGE LOG entry. This
+    per-position mechanism was superseded by relying on
+    check_global_flatten() alone, same deadline, one path instead of two.
   - FIXED a real bug this change exposed: _get_position() only ever
     returned the FIRST matching open position for this strategy's MAGIC
     number. Once OCO cancellation is removed, a dual-fill produces TWO
@@ -469,11 +459,11 @@ import MetaTrader5 as mt5
 # FOMC) — do not assume a fixed-rule pattern for any of them; the 2025
 # government shutdown proved that assumption can silently break.
 #
-# *** All timestamps below are stored 2 SECONDS EARLY relative to the real
-# release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:58).
-# Widened from 1s to 2s on 2026-09-16 — see CHANGE LOG. The real release
+# *** All timestamps below are stored 1 SECOND EARLY relative to the real
+# release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:59).
+# Narrowed from 3s to 1s on 2026-09-12 — see CHANGE LOG. The real release
 # moment for any entry here is `release_time + EARLY_ENTRY_SECONDS` (now
-# 2 seconds).
+# 1 second).
 #
 # IMPORTANT: these are LITERAL, hand-typed timestamps — NOT computed from
 # EARLY_ENTRY_SECONDS. If EARLY_ENTRY_SECONDS is ever changed again, every
@@ -494,24 +484,22 @@ NFP_SCHEDULE_UTC: List[datetime.datetime] = [
     datetime.datetime(2026, 10, 2, 12, 29, 58, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 11, 6, 13, 29, 58, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 12, 4, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    # Add next month's date here, 2s EARLY. DST-adjust by hand: 8:30 AM ET
+    # Add next month's date here, 1s EARLY. DST-adjust by hand: 8:30 AM ET
     # = 12:30:00 UTC during DST (roughly Mar-Nov), 13:30:00 UTC otherwise
-    # -> store as 12:29:58 / 13:29:58 respectively.
+    # -> store as 12:29:59 / 13:29:59 respectively.
 ]
 
 CPI_SCHEDULE_UTC: List[datetime.datetime] = [
     # ^ CORRECTED 2026-09-12 — was stored as 16:49:57, a stale/corrupted
     # literal inconsistent with its own prior comment. Confirmed via BLS:
-    # real CPI release is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST).
-    # Re-shifted 2026-09-16 from 1s-early to 2s-early (12:29:59 ->
-    # 12:29:58) along with every other literal in this file — see
-    # CHANGE LOG. If this time has already passed by the time this file
-    # is deployed, it's a no-op (window will simply never open) and can
-    # be dropped on the next cleanup.
+    # real CPI release is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST),
+    # so 1s-early is 12:29:59. If this time has already passed by the
+    # time this file is deployed, it's a no-op (window will simply never
+    # open) and can be dropped on the next cleanup.
     datetime.datetime(2026, 10, 14, 12, 29, 58, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 11, 10, 13, 29, 58, tzinfo=datetime.timezone.utc),
     datetime.datetime(2026, 12, 10, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    # Same 8:30 AM ET / DST rule as NFP, stored 2s EARLY. Check
+    # Same 8:30 AM ET / DST rule as NFP, stored 1s EARLY. Check
     # bls.gov/schedule/news_release/cpi.htm
 ]
 
@@ -530,8 +518,7 @@ FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
     datetime.datetime(2027, 10, 27, 17, 59, 58, tzinfo=datetime.timezone.utc),
     datetime.datetime(2027, 12, 8, 18, 59, 58, tzinfo=datetime.timezone.utc),
     # Decision time is 2:00 PM ET = 18:00:00 UTC during DST, 19:00:00 UTC
-    # otherwise -> stored 2s EARLY as 17:59:58 / 18:59:58 respectively.
-    # Re-shifted 2026-09-16 from 1s-early to 2s-early (see CHANGE LOG).
+    # otherwise -> stored 1s EARLY as 17:59:59 / 18:59:59 respectively.
     # All 2027 dates confirmed against the Fed's own published (tentative)
     # 2027 calendar as of 2026-09-11 — not extrapolated.
 ]
@@ -539,8 +526,8 @@ FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
 # Real release time = stored schedule time + this. Kept as a named constant
 # so every place in the file that needs to reason about the REAL moment
 # (vs. the deliberately-early stored one) references the same value.
-# Widened 1.0 -> 2.0 on 2026-09-16, explicit instruction, not backtested —
-# see CHANGE LOG. (Previously narrowed 3.0 -> 1.0 on 2026-09-12.)
+# Narrowed 3.0 -> 1.0 on 2026-09-12 — see CHANGE LOG for the caveat about
+# this not being backtested and the missed-window risk it reintroduces.
 EARLY_ENTRY_SECONDS = 2.0
 
 # Maximum acceptable slippage (in points) on the exits THIS FILE controls
@@ -935,52 +922,6 @@ class NewsSpikeStrategy:
         ]
         return len(own_closes) > 0
 
-    def _release_time_for_position(
-        self, open_time: datetime.datetime
-    ) -> Optional[datetime.datetime]:
-        """Stateless lookup of which scheduled event a given open
-        position belongs to, used by manage_open_trade() to anchor the
-        force-close deadline to the REAL RELEASE TIME rather than the
-        position's own open time. Returns the real release time of the
-        most recent event whose entry window had already OPENED (stored
-        release_time <= open_time) at or before this position's own open
-        time — NOT the most recent event whose real_release had already
-        passed (see 2026-09-16 CHANGE LOG for why that distinction
-        matters: a fast fill inside the pre-release window, before real
-        release, broke the old real_release-based check). A position
-        should only ever exist because its pending order was placed once
-        that event's window opened, so "most recent window-open <=
-        open_time" reliably identifies the event it belongs to without
-        needing any stored event-to-position mapping — while the
-        deadline itself still anchors to that event's real_release, not
-        to window-open."""
-        candidates: List[datetime.datetime] = []
-        for schedule in (NFP_SCHEDULE_UTC, CPI_SCHEDULE_UTC, FOMC_SCHEDULE_UTC):
-            for release_time in schedule:
-                real_release = release_time + datetime.timedelta(
-                    seconds=EARLY_ENTRY_SECONDS
-                )
-                # Compare against the STORED (early) release_time, not
-                # real_release. A pending stop order is placed the
-                # instant the entry window opens (release_time), and can
-                # fill at ANY point after that — including BEFORE
-                # real_release, if price reaches the offset that fast
-                # (a real live risk around a fast news print, not just a
-                # test artifact; more exposed now that
-                # EARLY_ENTRY_SECONDS is 2s instead of 1s, giving more
-                # time inside the window for a fast fill to land before
-                # "real release"). Bug found 2026-09-16: the old check
-                # (`real_release <= open_time`) excluded exactly this
-                # case, causing the position to be misattributed to a
-                # STALE EARLIER event whose deadline had already passed
-                # — an instant, wrong force-close instead of a real
-                # ~60s hold. The deadline itself must still anchor to
-                # real_release (unchanged below) — only the matching
-                # condition changes.
-                if release_time <= open_time:
-                    candidates.append(real_release)
-        return max(candidates) if candidates else None
-
     def _next_flatten_window(
         self, now: datetime.datetime, lead_minutes: float = 10.0
     ) -> Optional[Tuple[datetime.datetime, str]]:
@@ -1211,8 +1152,7 @@ class NewsSpikeStrategy:
     ) -> Dict[str, Any]:
         """Call on every poll (~1s cadence required near a scheduled event
         — a narrow entry window with slower polling risks stepping over
-        it entirely; widened back to 2s early on 2026-09-16, easing that
-        risk slightly versus the prior 1s window). Places
+        it entirely, more so now at 1s early than it did at 3s). Places
         the straddle in the narrow pre-release gap for whichever event
         type (NFP/CPI/FOMC) currently has it open. manage_open_trade()
         then handles the hard 1-minute force-close — there is no TP, no
@@ -1437,105 +1377,37 @@ class NewsSpikeStrategy:
 
     def manage_open_trade(self, symbol: str) -> str:
         """Call on every poll while a position (or positions — see below)
-        is open. Checks and manages ALL of this strategy's own open
-        positions on the symbol independently, not just one — necessary
-        because OCO cancellation was removed (manage_pending_orders() no
-        longer cancels the opposite order on a fill), so a dual-fill can
-        leave TWO positions open at once, and both must be tracked or one
-        would sit open indefinitely.
+        is open. Checks ALL of this strategy's own open positions on the
+        symbol and keeps each one's SL corrected for entry slippage.
 
-        The deadline for each position is RELEASE-ANCHORED, not entry-
-        anchored: real_release_time + max_hold_seconds, the SAME fixed
-        moment for every position tied to a given event regardless of
-        when that specific position actually filled. A late-filling leg
-        gets whatever time is left until that shared deadline, not a
-        fresh max_hold_seconds of its own. Falls back to entry-anchored
-        timing (this position's own open time + max_hold_seconds) only
-        if the release time can't be determined at all, which should not
-        happen in normal operation."""
+        Does NOT force-close positions itself. Closing is handled
+        entirely by check_global_flatten() (called once per poll cycle
+        from the main loop, outside the per-symbol loop) — it already
+        unconditionally flattens the WHOLE ACCOUNT, this strategy's own
+        XAUUSDm positions included, at real_release_time +
+        max_hold_seconds. Per explicit decision (2026-09-17), the
+        separate per-position release-anchored close that used to run
+        here was removed: it was a second, independent path to the exact
+        same deadline check_global_flatten() already enforces, and a
+        second place a timing bug could hide. Same reasoning already
+        applied to pending-order cleanup in manage_pending_orders() (see
+        its 2026-09-14 CHANGE LOG entry) — this makes closing consistent
+        with that: one deadline, one mechanism, enforced in one place."""
         positions = self._get_positions(symbol)
         if not positions:
             return "No open trade"
 
-        cfg = SYMBOL_CONFIG[symbol]
-        now = _utc_now()
         statuses: List[str] = []
-
         for pos in positions:
             sl_fix = self._correct_sl_for_slippage(symbol, pos)
             if sl_fix:
                 statuses.append(sl_fix)
-
-            open_time = datetime.datetime.fromtimestamp(
-                pos.time, tz=datetime.timezone.utc
-            )
-            release_time = self._release_time_for_position(open_time)
-            print(
-                f"  [DEBUG] ticket={pos.ticket} open_time={open_time} "
-                f"matched_real_release={release_time}"
-            )
-            if release_time is not None:
-                deadline = release_time + datetime.timedelta(
-                    seconds=cfg["max_hold_seconds"]
-                )
-            else:
-                # Fallback — should not normally trigger, but fails safe
-                # to the old entry-anchored behavior rather than never
-                # closing the position at all.
-                deadline = open_time + datetime.timedelta(
-                    seconds=cfg["max_hold_seconds"]
-                )
-
-            if now < deadline:
-                remaining = (deadline - now).total_seconds()
-                statuses.append(
-                    f"ticket={pos.ticket} holding — {remaining:.0f}s until "
-                    f"release-anchored close"
-                )
-                continue
-
-            closed = self._close_position_at_market(symbol, pos)
             statuses.append(
-                f"ticket={pos.ticket} "
-                + (
-                    "force-closed at market (release+"
-                    f"{cfg['max_hold_seconds']:.0f}s deadline reached)"
-                    if closed
-                    else "force-close FAILED — will retry next cycle"
-                )
+                f"ticket={pos.ticket} open — closed by check_global_flatten() "
+                "at the event deadline"
             )
 
         return "; ".join(statuses)
-
-    def _close_position_at_market(self, symbol: str, position) -> bool:
-        """deviation uses EXIT_DEVIATION (effectively uncapped), not a
-        tight fixed value. This is a maximum tolerance, not a target —
-        it doesn't change fill price on a calm exit, only whether a
-        volatile one is allowed to complete."""
-        tick = self._get_tick(symbol)
-        if tick is None:
-            return False
-        is_buy = position.type == mt5.POSITION_TYPE_BUY
-        result = self._safe_order_send(
-            {
-                "action": mt5.TRADE_ACTION_DEAL,
-                "symbol": symbol,
-                "volume": position.volume,
-                "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                "position": position.ticket,
-                "price": tick.bid if is_buy else tick.ask,
-                "deviation": EXIT_DEVIATION,
-                "magic": MAGIC,
-                "comment": COMMENT_FORCE_CLOSE,
-                "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": self._filling_mode(symbol),
-            }
-        )
-        if result is not None and result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(
-                f"  Close {symbol} rejected — retcode={result.retcode} comment='{result.comment}'"
-            )
-        return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
     # ---------------------------------------------------------------- reporting
 
@@ -1572,37 +1444,6 @@ class NewsSpikeStrategy:
             sym: self.get_performance_summary(sym, lookback_days)
             for sym in self.traded_symbols
         }
-
-    def event_countdown(self, now: Optional[datetime.datetime] = None) -> Optional[str]:
-        """PUBLIC, purely informational — has ZERO effect on trading
-        logic (entry, exit, flatten all still run off their own
-        independent checks elsewhere). Returns a countdown string
-        whenever `now` falls between an event's real_release and its
-        close deadline (real_release + max_hold_seconds) — regardless
-        of whether a position or pending order actually exists. The
-        close does NOT depend on any trade: this just visualizes the
-        same deadline manage_open_trade() and check_global_flatten()
-        are already independently enforcing."""
-        if now is None:
-            now = _utc_now()
-        hold_seconds = SYMBOL_CONFIG.get("XAUUSDm", {}).get("max_hold_seconds", 60.0)
-        for event_type, schedule in (
-            ("NFP", NFP_SCHEDULE_UTC),
-            ("CPI", CPI_SCHEDULE_UTC),
-            ("FOMC", FOMC_SCHEDULE_UTC),
-        ):
-            for release_time in schedule:
-                real_release = release_time + datetime.timedelta(
-                    seconds=EARLY_ENTRY_SECONDS
-                )
-                deadline = real_release + datetime.timedelta(seconds=hold_seconds)
-                if real_release <= now <= deadline:
-                    remaining = (deadline - now).total_seconds()
-                    return (
-                        f"[{event_type}] EVENT LIVE — {remaining:.0f}s until "
-                        f"close (release {real_release}, deadline {deadline})"
-                    )
-        return None
 
     # ---------------------------------------------------------------- util
 
@@ -1649,7 +1490,7 @@ if __name__ == "__main__":
     print(f"*** risk_pct is FLAT 14% on all event types: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest and drawdown behind this decision (-37.0% max drawdown on the 49-event historical sequence) ***")
     print("*** XAGUSDm removed 2026-09-11, copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
     print(
-        f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after -- WIDENED to 2s on 2026-09-16 (was 1s), NOT independently backtested, see CHANGE LOG ***"
+        f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after -- NARROWED to 1s on 2026-09-12, NOT independently backtested, see CHANGE LOG ***"
     )
     print(
         "*** GLOBAL FLATTEN: at release+60s, EVERY position/order on the WHOLE ACCOUNT "
