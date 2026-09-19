@@ -27,7 +27,7 @@ import pandas as pd
 import os
 
 # ── Config ────────────────────────────────────────────────────────────────
-INPUT_PATH = r"C:\Users\AFRIPOINTDEV\Downloads\Exness_XAUUSDm_2026_09_11"
+INPUT_PATH = r"C:\Users\AFRIPOINTDEV\Downloads\Exness_XAUUSDm_2026_09_16 (1)"
 # ^ if this is a folder (extracted zip contents) rather than the CSV
 # itself, the script below will look inside it for a .csv automatically.
 OUTPUT_DIR = "filtered"
