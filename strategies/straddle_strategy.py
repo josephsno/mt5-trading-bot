@@ -144,17 +144,17 @@ CHANGE LOG (this revision):
     Root cause: _lot_size() floored at self.min_lot, hardcoded to 0.01 in
     __init__, but the broker minimum for both indices is 0.05, so every
     index order was sent below volume_min and rejected.
-  - REMOVED risk-percent sizing entirely (Joseph's instruction,
-    2026-09-21). _lot_size(symbol) now ALWAYS returns the broker's own
-    volume_min for that symbol, read fresh from mt5.symbol_info() on every
-    call: 0.01 for FX/gold/BTC/silver, 0.05 for USTECm/US30m. No balance
-    lookup, no risk_pct, no skip guard (the INDEX_MAX_RISK_MULTIPLE guard
-    from the earlier draft of this revision was dropped). Consequence, by
-    design: dollar risk per trade is fixed, not a % of account, and does
-    not compound as balance grows. Approx. risk per full stop-loss at the
-    floor: EUR/GBP $2.50, JPY ~$1.67 (at ~150, moves with price), gold
-    $20, BTC $6, silver $6, USTECm/US30m $2.00. self.min_lot is used only
-    as a fallback if symbol_info() returns None.
+  - Sizing is risk-based again (Joseph's instruction, 2026-09-21): lot =
+    (balance * risk_pct%) / (SL * pip_value), rounded to the broker's
+    volume_step, then clamped to the broker's own volume_min (up) and
+    volume_max (down), all read fresh from mt5.symbol_info() every call.
+    If the calculated lot is below the minimum it is simply raised to the
+    minimum — no skip guard, no risk cap on any symbol (the
+    INDEX_MAX_RISK_MULTIPLE guard from an earlier draft was dropped). At
+    the minimum, risk per full stop-loss is above the 1% target on small
+    balances: EUR/GBP $2.50, JPY ~$1.67, gold $20, BTC $6, silver $6,
+    USTECm/US30m $2.00 (0.05 lot). self.min_lot / self.lot_step are used
+    only as fallbacks if symbol_info() returns None.
   - Added USTECm/US30m config, weekend-closure, pip-value and price
     rounding branches (previous revision, unchanged here).
   - Fixed XAGUSDm's SYMBOL_CONFIG entry, which was missing required keys
@@ -332,17 +332,17 @@ SILVER_MIN_BALANCE = (
 )
 
 # USTECm's contract size is CONFIRMED, not assumed — see the module
-# docstring's USTECm note. Sizing is always the broker minimum lot (0.05
-# for this symbol), so one full stop-loss = 40 pts * $1 * 0.05 = $2.00.
-# USTEC_MIN_BALANCE is documentation only (balance at which that equals
-# 1%: $200) — not used as a gate anywhere.
+# docstring's USTECm note. The broker minimum lot is 0.05, so when the
+# risk-based lot calculates below that it is raised to 0.05: one full
+# stop-loss then = 40 pts * $1 * 0.05 = $2.00. USTEC_MIN_BALANCE is
+# documentation only (balance at which that equals 1%: $200) — not a gate.
 USTEC_ENABLED = True
 USTEC_MIN_BALANCE = 200.0
 
 # US30m — same contract-math situation as USTECm: CONFIRMED, not assumed
 # (mt5.symbol_info("US30m"): contract_size=1.0, tick_value=0.1, tick_size=0.1
 # -> $1.00 per 1.0-point move per lot). Same 0.05 broker minimum, same
-# $2.00 full-stop risk, same documentation-only $200 figure.
+# $2.00 full-stop risk at the floor, same documentation-only $200 figure.
 US30_ENABLED = True
 US30_MIN_BALANCE = 200.0
 
@@ -439,10 +439,9 @@ class StraddleStrategy:
         lot_step: float = 0.01,
         initial_balance: float = 90.0,
     ) -> None:
-        self.risk_pct = risk_pct  # UNUSED — sizing is always broker min lot; kept
-        # only so existing callers (main_straddle.py) don't break
-        self.min_lot = min_lot  # fallback only — real minimum comes from symbol_info()
-        self.lot_step = lot_step  # unused, kept for caller compatibility
+        self.risk_pct = risk_pct
+        self.min_lot = min_lot  # fallback only — real limits come from symbol_info()
+        self.lot_step = lot_step  # fallback only — real limits come from symbol_info()
         self.starting_balance = initial_balance
         self.traded_symbols: List[str] = [
             s
@@ -460,16 +459,28 @@ class StraddleStrategy:
         acc = mt5.account_info()
         return acc.balance if acc else self.starting_balance
 
-    def _lot_size(self, symbol: str) -> float:
-        """Always the broker's own minimum lot for this symbol, read fresh
-        from mt5.symbol_info() every call — no risk-percent math, no
-        balance lookup. 0.01 for FX/gold/BTC/silver, 0.05 for USTECm/US30m.
+    def _lot_size(self, symbol: str, price: float, sl_units: float) -> float:
+        """Normal risk-based lot (balance * risk_pct% / (SL * pip value)),
+        rounded to the broker's volume_step and clamped to the broker's own
+        volume_min / volume_max, read fresh from mt5.symbol_info() every
+        call. If the calculated lot is below the broker minimum it is
+        raised to the minimum — expected at small balances, not a bug.
+
         Root cause of the 2026-09-21 retcode=10014 "Invalid volume"
-        rejections was the old hardcoded 0.01 floor sitting below the
-        indices' real 0.05 minimum. self.min_lot is only a fallback for the
-        unexpected case where symbol_info() returns None."""
+        rejections on USTECm/US30m: the old floor was a hardcoded
+        self.min_lot=0.01, below the indices' real 0.05 minimum.
+        self.min_lot / self.lot_step are only fallbacks for the unexpected
+        case where symbol_info() returns None."""
         info = mt5.symbol_info(symbol)
-        return round(info.volume_min if info else self.min_lot, 2)
+        vmin = info.volume_min if info else self.min_lot
+        vstep = info.volume_step if info else self.lot_step
+        vmax = info.volume_max if info else 100.0
+
+        pip_value = _pip_value_per_lot(symbol, price)
+        risk_dollar = self._balance() * (self.risk_pct / 100.0)
+        raw = risk_dollar / (sl_units * pip_value)
+        lot = min(vmax, max(vmin, round(raw / vstep) * vstep))
+        return round(lot, 2)
 
     # ---------------------------------------------------------------- MT5 reads
 
@@ -693,7 +704,7 @@ class StraddleStrategy:
         buy_sl = _round_price(buy_stop - sl, symbol)
         sell_sl = _round_price(sell_stop + sl, symbol)
 
-        lots = self._lot_size(symbol)
+        lots = self._lot_size(symbol, anchor, cfg["sl"])
         expiration = self._cancel_deadline(cfg["cancel_hour"])
         filling_mode = self._filling_mode(symbol)
 
@@ -1072,7 +1083,7 @@ class StraddleStrategy:
     def __repr__(self) -> str:
         return (
             f"StraddleStrategy("
-            f"lot=broker_min, symbols={self.traded_symbols}, "
+            f"risk={self.risk_pct}%, symbols={self.traded_symbols}, "
             f"breaker={BREAKER_MIN_SYMBOLS_FLAGGED}x{BREAKER_LOSS_STREAK}L, "
             f"adaptive_deadline=-{DEADLINE_BUFFER_HOURS}h_before_next_trigger, "
             f"stateless=True)"
