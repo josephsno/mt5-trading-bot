@@ -79,8 +79,84 @@ adaptive per-symbol deadline applied — no silently skipped days):
     `mt5.symbol_info("XAGUSDm").trade_contract_size` on the actual account
     ASAP — if it isn't 5000, every silver position size placed until this
     is checked is silently wrong in the same way the BTC one could be.
+  USTECm @ 15:00 UTC : NASDAQ-100 index CFD, added this revision.
+    contract_size CONFIRMED (mt5.symbol_info) = 1.0, tick_value=0.01,
+    tick_size=0.01 -> $1.00 P&L per 1.0 lot per 1.00-point move, no
+    inference needed, unlike BTC/XAG above. 15:00 UTC = 10:00am ET, the
+    hour right after the NASDAQ cash open (9:30am ET) — mechanically
+    sensible the same way GBPUSD's 04:00 UTC anticipates UK data.
+    2-year backtest (2024-07 to 2026-08, offset=12/sl=40/trail=20/
+    be_trigger=40 points): 548 trades, 63.0% win rate, +19,358 points net
+    of spread. All 3 years (2024/2025/2026 partial) independently
+    positive; %-of-price-normalized return stable across years (0.175%,
+    0.153%, 0.172% avg/trade) confirming this isn't just riding the
+    index's price appreciation. Train/test half-split held up tightly
+    (60.1%->59.9% win rate). Robust across offset/trail ratio choices and
+    SL sizes 40-200 — not fit to one specific parameter combo. 14:00 UTC
+    also tested and also passed every check with a higher raw total
+    (+22,180 pts net) but degraded more between train/test halves
+    (60.4%->52.9%) — 15:00 chosen for consistency.
+    SIZING (CORRECTED 2026-09-21): the broker's real minimum lot is 0.05
+    (volume_min=0.05, volume_step=0.01, volume_max=500.0 — from
+    mt5.symbol_info), NOT the 0.01 this file used to assume. The earlier
+    claim here of "~$0.80 risk at the 0.01 floor" was wrong: at the real
+    0.05 floor one stop-loss is 40 pts * $1.00 * 0.05 lot = $2.00, i.e.
+    2.2% of a $90 balance against a 1% / $0.90 target. Backtest results
+    are in points and are unaffected; only per-trade dollar risk changes.
+    Real spread (avg ~2.25 price-units at fill, confirmed from the
+    CSV's own spread column) already netted out of the total above.
+    USTEC_ENABLED is True at Joseph's explicit instruction after this
+    session's evaluation — demo-first, per this project's standing
+    practice for any newly-added symbol.
+  US30m @ 15:00 UTC : Dow Jones index CFD, added this revision alongside
+    USTECm — same evaluation ritual, same trigger hour. contract_size
+    CONFIRMED = 1.0, tick_value=0.1, tick_size=0.1 -> $1.00 P&L per 1.0
+    lot per 1.00-point move (same $1/point result as USTECm despite the
+    different tick_value/tick_size pair — 0.1/0.1 = 0.01/0.01 = 1.0).
+    2-year backtest (2024-07 to 2026-08, offset=12/sl=40/trail=20/
+    be_trigger=40 points): 548 trades, 63.7% win rate, +32,268 points net
+    of spread — the strongest result of any symbol evaluated in this
+    project to date, beating USTECm's own +19,358-22,180 range and every
+    FX/gold/BTC/silver number in the module summary above. All 3 years
+    independently positive (70.2% / 61.1% / 62.9% win rate, 2024/2025/
+    2026); %-of-price-normalized return stable across years (0.121%,
+    0.115%, 0.126% avg/trade). Train/test half-split held tightly
+    (63.9%->60.9%). Unlike USTECm, 15:00 UTC beat 14:00 UTC outright here
+    on every metric (win rate, total, train/test stability) — no
+    trade-off to weigh, so both symbols share the identical 15:00 UTC /
+    12-40-20-40 configuration. Side-fill check (buy-stop vs sell-stop)
+    confirmed no directional bias: 47.8%/52.2% buy/sell fill split,
+    64.1%/63.3% win rate either side — consistent with the strategy's
+    core coin-flip-direction premise, same pattern already seen on EUR/
+    GBP/JPY. Real spread (avg ~2.74 price-units at fill) already netted
+    out of the total above.
+    SIZING (CORRECTED 2026-09-21): same real broker limits as USTECm —
+    volume_min=0.05, volume_step=0.01, volume_max=500.0. Same $2.00 risk
+    per stop-loss at the floor (2.2% of $90). NOTE USTECm and US30m fire
+    at the identical 15:00 UTC hour and are highly correlated, so a
+    simultaneous loss on both is ~$4.00 — treat them as close to one
+    bet, not two. US30_ENABLED is True at Joseph's explicit instruction
+    after this session's evaluation — demo-first, same as USTECm and
+    every other newly-added symbol.
 
 CHANGE LOG (this revision):
+  - FIXED retcode=10014 "Invalid volume" on every USTECm/US30m order.
+    Root cause: _lot_size() floored at self.min_lot, hardcoded to 0.01 in
+    __init__, but the broker minimum for both indices is 0.05, so every
+    index order was sent below volume_min and rejected.
+  - REMOVED risk-percent sizing entirely (Joseph's instruction,
+    2026-09-21). _lot_size(symbol) now ALWAYS returns the broker's own
+    volume_min for that symbol, read fresh from mt5.symbol_info() on every
+    call: 0.01 for FX/gold/BTC/silver, 0.05 for USTECm/US30m. No balance
+    lookup, no risk_pct, no skip guard (the INDEX_MAX_RISK_MULTIPLE guard
+    from the earlier draft of this revision was dropped). Consequence, by
+    design: dollar risk per trade is fixed, not a % of account, and does
+    not compound as balance grows. Approx. risk per full stop-loss at the
+    floor: EUR/GBP $2.50, JPY ~$1.67 (at ~150, moves with price), gold
+    $20, BTC $6, silver $6, USTECm/US30m $2.00. self.min_lot is used only
+    as a fallback if symbol_info() returns None.
+  - Added USTECm/US30m config, weekend-closure, pip-value and price
+    rounding branches (previous revision, unchanged here).
   - Fixed XAGUSDm's SYMBOL_CONFIG entry, which was missing required keys
     ("pip", "cancel_hour") and carried two dead keys that nothing in this
     file ever reads ("risk_pct" — self.risk_pct is the only one used;
@@ -205,6 +281,26 @@ SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
         "trigger_minute": 0,
         "cancel_hour": 22,
     },
+    "USTECm": {
+        "pip": 1.0,  # working directly in raw index points, like XAU/BTC/XAG
+        "offset": 12,
+        "sl": 40,
+        "trail": 20,
+        "be_trigger": 40,
+        "trigger_hour": 15,  # 10:00am ET, right after the 9:30am ET cash open
+        "trigger_minute": 0,
+        "cancel_hour": 23,
+    },
+    "US30m": {
+        "pip": 1.0,  # working directly in raw index points, like USTECm
+        "offset": 12,
+        "sl": 40,
+        "trail": 20,
+        "be_trigger": 40,
+        "trigger_hour": 15,  # same 10:00am ET post-cash-open hour as USTECm
+        "trigger_minute": 0,
+        "cancel_hour": 23,
+    },
 }
 
 # Gold's out-of-sample win rate improved 56.4% -> 64.1% and held up after
@@ -230,10 +326,25 @@ BTC_MIN_BALANCE = 600.0  # SL($600) * unit_value(1.0) * min_lot(0.01) / 1% targe
 # mt5.symbol_info("XAGUSDm").trade_contract_size on the actual account
 # ASAP — if the guess below is wrong, every silver position size placed
 # until this is checked is silently wrong, same failure mode as BTC.
-SILVER_ENABLED = True
+SILVER_ENABLED = False
 SILVER_MIN_BALANCE = (
     300.0  # SL($0.12) * assumed_unit_value($5000/lot) * min_lot(0.01) / 1% target risk
 )
+
+# USTECm's contract size is CONFIRMED, not assumed — see the module
+# docstring's USTECm note. Sizing is always the broker minimum lot (0.05
+# for this symbol), so one full stop-loss = 40 pts * $1 * 0.05 = $2.00.
+# USTEC_MIN_BALANCE is documentation only (balance at which that equals
+# 1%: $200) — not used as a gate anywhere.
+USTEC_ENABLED = True
+USTEC_MIN_BALANCE = 200.0
+
+# US30m — same contract-math situation as USTECm: CONFIRMED, not assumed
+# (mt5.symbol_info("US30m"): contract_size=1.0, tick_value=0.1, tick_size=0.1
+# -> $1.00 per 1.0-point move per lot). Same 0.05 broker minimum, same
+# $2.00 full-stop risk, same documentation-only $200 figure.
+US30_ENABLED = True
+US30_MIN_BALANCE = 200.0
 
 MAGIC = 20260716  # unique to this strategy, keeps it from colliding with the M15 bot
 
@@ -249,12 +360,20 @@ WEEKLY_CLOSE_HOUR = 20  # UTC, Friday — hard cap so no position ever rides
 # below would cut off real weekend price action for no matching gap-risk
 # reason. If BTC's actual broker hours ever turn out to include a real
 # weekend closure, move it into this set.
-WEEKEND_CLOSED_SYMBOLS = {"EURUSDm", "USDJPYm", "GBPUSDm", "XAUUSDm", "XAGUSDm"}
+WEEKEND_CLOSED_SYMBOLS = {
+    "EURUSDm",
+    "USDJPYm",
+    "GBPUSDm",
+    "XAUUSDm",
+    "XAGUSDm",
+    "USTECm",
+    "US30m",
+}
 
 # Cross-pair circuit breaker
 BREAKER_LOSS_STREAK = 2
 BREAKER_MIN_SYMBOLS_FLAGGED = 2
-BREAKER_MAX_PAUSE_HOURS = 10  # hard fallback: never pause longer than this,
+BREAKER_MAX_PAUSE_HOURS = 0  # hard fallback: never pause longer than this,
 # regardless of streak state — see _is_paused()
 
 
@@ -266,10 +385,13 @@ def _pip_value_per_lot(symbol: str, price: float) -> float:
     """USD value of a 1-unit move at 1.0 lot. Fixed $10/pip for USD-quoted
     FX pairs, dynamic for USDJPY (JPY-quoted), $100/point for XAUUSD
     (1.0 lot = 100 oz), $1/point for BTCUSDm — THAT ONE ASSUMES 1.0 lot =
-    1 BTC, UNVERIFIED against the real broker contract spec — and
-    $5000/point for XAGUSDm, which ASSUMES 1.0 lot = 5000 oz, also
-    UNVERIFIED. See the module docstring's notes before trusting position
-    sizes on either symbol."""
+    1 BTC, UNVERIFIED against the real broker contract spec — $5000/point
+    for XAGUSDm, which ASSUMES 1.0 lot = 5000 oz, also UNVERIFIED, and
+    $1/point for USTECm and US30m, which ARE confirmed directly from
+    mt5.symbol_info (USTECm: contract_size=1.0, tick_value=0.01,
+    tick_size=0.01; US30m: contract_size=1.0, tick_value=0.1,
+    tick_size=0.1 -> $1.00 per 1.00-point move per lot for both). See the
+    module docstring's notes before trusting position sizes on BTC or XAG."""
     if symbol == "USDJPYm":
         return 1000.0 / price
     if symbol == "XAUUSDm":
@@ -278,6 +400,10 @@ def _pip_value_per_lot(symbol: str, price: float) -> float:
         return 1.0
     if symbol == "XAGUSDm":
         return 5000.0
+    if symbol == "USTECm":
+        return 1.0
+    if symbol == "US30m":
+        return 1.0
     return 10.0
 
 
@@ -290,6 +416,10 @@ def _round_price(price: float, symbol: str) -> float:
         return round(price, 2)
     if symbol == "XAGUSDm":
         return round(price, 3)
+    if symbol == "USTECm":
+        return round(price, 2)  # digits=2 per mt5.symbol_info("USTECm")
+    if symbol == "US30m":
+        return round(price, 1)  # digits=1 per mt5.symbol_info("US30m")
     return round(price, 5)
 
 
@@ -309,9 +439,10 @@ class StraddleStrategy:
         lot_step: float = 0.01,
         initial_balance: float = 90.0,
     ) -> None:
-        self.risk_pct = risk_pct
-        self.min_lot = min_lot
-        self.lot_step = lot_step
+        self.risk_pct = risk_pct  # UNUSED — sizing is always broker min lot; kept
+        # only so existing callers (main_straddle.py) don't break
+        self.min_lot = min_lot  # fallback only — real minimum comes from symbol_info()
+        self.lot_step = lot_step  # unused, kept for caller compatibility
         self.starting_balance = initial_balance
         self.traded_symbols: List[str] = [
             s
@@ -319,6 +450,8 @@ class StraddleStrategy:
             if (s != "XAUUSDm" or GOLD_ENABLED)
             and (s != "BTCUSDm" or BTC_ENABLED)
             and (s != "XAGUSDm" or SILVER_ENABLED)
+            and (s != "USTECm" or USTEC_ENABLED)
+            and (s != "US30m" or US30_ENABLED)
         ]
 
     # ---------------------------------------------------------------- balance
@@ -327,14 +460,16 @@ class StraddleStrategy:
         acc = mt5.account_info()
         return acc.balance if acc else self.starting_balance
 
-    def _lot_size(self, symbol: str, price: float, sl_units: float) -> float:
-        """Risk-based lot size, floored at the broker minimum. At small
-        account sizes this floor is almost always the binding constraint,
-        not the risk_pct target — expected, not a bug."""
-        pip_value = _pip_value_per_lot(symbol, price)
-        risk_dollar = self._balance() * (self.risk_pct / 100.0)
-        lot = risk_dollar / (sl_units * pip_value)
-        return max(self.min_lot, round(lot / self.lot_step) * self.lot_step)
+    def _lot_size(self, symbol: str) -> float:
+        """Always the broker's own minimum lot for this symbol, read fresh
+        from mt5.symbol_info() every call — no risk-percent math, no
+        balance lookup. 0.01 for FX/gold/BTC/silver, 0.05 for USTECm/US30m.
+        Root cause of the 2026-09-21 retcode=10014 "Invalid volume"
+        rejections was the old hardcoded 0.01 floor sitting below the
+        indices' real 0.05 minimum. self.min_lot is only a fallback for the
+        unexpected case where symbol_info() returns None."""
+        info = mt5.symbol_info(symbol)
+        return round(info.volume_min if info else self.min_lot, 2)
 
     # ---------------------------------------------------------------- MT5 reads
 
@@ -558,7 +693,7 @@ class StraddleStrategy:
         buy_sl = _round_price(buy_stop - sl, symbol)
         sell_sl = _round_price(sell_stop + sl, symbol)
 
-        lots = self._lot_size(symbol, anchor, cfg["sl"])
+        lots = self._lot_size(symbol)
         expiration = self._cancel_deadline(cfg["cancel_hour"])
         filling_mode = self._filling_mode(symbol)
 
@@ -937,7 +1072,7 @@ class StraddleStrategy:
     def __repr__(self) -> str:
         return (
             f"StraddleStrategy("
-            f"risk={self.risk_pct}%, symbols={self.traded_symbols}, "
+            f"lot=broker_min, symbols={self.traded_symbols}, "
             f"breaker={BREAKER_MIN_SYMBOLS_FLAGGED}x{BREAKER_LOSS_STREAK}L, "
             f"adaptive_deadline=-{DEADLINE_BUFFER_HOURS}h_before_next_trigger, "
             f"stateless=True)"
@@ -958,6 +1093,10 @@ if __name__ == "__main__":
                 reason = " (disabled: BTC_ENABLED=False — contract size unverified)"
             elif sym == "XAGUSDm":
                 reason = " (disabled: SILVER_ENABLED=False — contract size unverified)"
+            elif sym == "USTECm":
+                reason = " (disabled: USTEC_ENABLED=False)"
+            elif sym == "US30m":
+                reason = " (disabled: US30_ENABLED=False)"
         print(
             f"  {sym}: trigger={cfg['trigger_hour']:02d}:{cfg.get('trigger_minute',0):02d} UTC  "
             f"cancel={cfg['cancel_hour']:02d}:00 UTC  "

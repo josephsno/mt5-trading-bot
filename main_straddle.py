@@ -1,8 +1,8 @@
 import time
 import MetaTrader5 as mt5
 from decouple import config, AutoConfig
-from .mt5.meter_trader_config import MetaTraderConfig
-from .strategies.straddle_strategy import StraddleStrategy
+from mt5.meter_trader_config import MetaTraderConfig
+from strategies.straddle_strategy import StraddleStrategy
 from datetime import datetime, timezone
 import os
 

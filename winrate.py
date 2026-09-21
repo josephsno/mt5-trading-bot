@@ -126,6 +126,13 @@ def main():
         print(f"\nProfitable symbols ({len(profitable)}): {', '.join(sorted(profitable)) or 'none'}")
         print(f"Losing symbols ({len(losing)}): {', '.join(sorted(losing)) or 'none'}")
 
+    for s in ("USTECm", "US30m"):
+        mt5.symbol_select(s, True)
+        i = mt5.symbol_info(s)
+        print(s, "min", i.volume_min, "step", i.volume_step, "max", i.volume_max,
+            "contract", i.trade_contract_size, "tick_value", i.trade_tick_value,
+            "tick_size", i.trade_tick_size)
+
     mt5.shutdown()
 
 
