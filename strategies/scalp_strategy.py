@@ -66,7 +66,7 @@ SYMBOL = "XAUUSDm"
 MAGIC = 20261003  # must not collide: straddle 20260716, spike 20260807,
 # confirm 20260801, reload 20260810
 
-ENTRY_HOUR = 6
+ENTRY_HOUR = 23
 ENTRY_WINDOW_SECONDS = 120  # place only between 06:00:00 and 06:02:00 UTC
 CLOSE_HOUR = 7  # everything own-MAGIC is closed/cancelled from 07:00 UTC
 

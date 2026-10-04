@@ -53,7 +53,7 @@ def sleep_until_next_tick(now: datetime, interval: int):
 
 reload_decouple()
 
-LIVE = False  # Demo first — see scalp_0600_strategy.py's module docstring.
+LIVE = False # Demo first — see scalp_0600_strategy.py's module docstring.
 
 # Standalone process, own magic number (20261003), no shared loop with
 # straddle_strategy.py or news_spike_strategy.py. Only ever touches its own
@@ -87,7 +87,6 @@ def main():
     print(f"Kill switch: {strategy.kill_switch()[1]}\n")
 
     # ── Main loop ─────────────────────────────────────────────────────────
-    last_status = None
     while True:
         # ONE timestamp per cycle, in broker time (VPS clock corrected
         # against the XAUUSDm tick — the VPS was once seen 64s off).
@@ -95,28 +94,28 @@ def main():
         minute = now.hour * 60 + now.minute
         tight = TIGHT_START_MINUTE <= minute <= TIGHT_END_MINUTE
 
+        print("=" * 55)
+        print(f"{now.strftime('%A %d %B %Y — %H:%M:%S UTC')}")
+        print("=" * 55)
+        print("\nXAUUSDm")
+
         try:
             # OCO cancel, TP/SL re-anchor to the real fill, and the 07:00
             # close/cancel of anything still open or pending.
             for msg in strategy.manage(now):
-                print(f"[{now:%H:%M:%S}] {msg}")
+                print(f"   {msg}")
 
             status = strategy.check_and_place(now)
-            # Print only meaningful changes, not "Outside entry window"
-            # every 30s all day.
-            if status != "Outside entry window" and status != last_status:
-                print("=" * 55)
-                print(f"{now.strftime('%A %d %B %Y — %H:%M:%S UTC')}")
-                print("=" * 55)
-                print(f"XAUUSDm\n   {status}")
-            last_status = status
-
-            # Daily heartbeat at 07:02 so the log shows the bot is alive and
-            # where the kill switch stands, even on no-trade days.
-            if now.hour == CLOSE_HOUR and now.minute == 2 and now.second < NORMAL_POLL_SECONDS:
-                print(f"[{now:%Y-%m-%d %H:%M}] Kill switch: {strategy.kill_switch(now)[1]}")
+            if status == "Outside entry window":
+                status = (
+                    f"Not inside the {ENTRY_HOUR:02d}:00 UTC entry window"
+                    f" — {strategy.kill_switch(now)[1]}"
+                )
+            print(f"   {status}")
         except Exception as e:  # never let one bad cycle kill the bot
-            print(f"[{now:%H:%M:%S}] Cycle error: {e!r}")
+            print(f"   Cycle error: {e!r}")
+
+        print("\nCycle done")
 
         sleep_until_next_tick(
             _utc_now(), TIGHT_POLL_SECONDS if tight else NORMAL_POLL_SECONDS
