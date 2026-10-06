@@ -2,53 +2,62 @@
 Gold 06:00 UTC Straddle Scalp — Live Version (stateless)
 =========================================================
 Edge   : At 06:00 UTC (quiet pre-London hour) gold tends to make one clean
-         push. A tight straddle catches it; a fixed $5 target banks it
-         before a typical swing back.
+         push. A tight straddle catches it; a fixed $10 target (2x the stop)
+         banks the push.
 Entry  : 06:00 UTC, buy-stop at mid + $2 and sell-stop at mid - $2.
          Whichever fills first is the trade; the other is cancelled (OCO).
          Orders are only placed between 06:00:00 and 06:02:00 UTC —
          if the bot misses that window, it sits the day out.
-TP/SL  : $5 / $5 from the REAL fill price (re-anchored after fill, so
-         entry slippage doesn't distort the 1:1 shape).
-Exit   : TP, SL, or hard close at 07:00 UTC — whatever is still open or
-         pending at 07:00 (own MAGIC only) is closed / cancelled.
+Filter : Skip placing while the spread is above SPREAD_MAX ($0.28). The check
+         repeats on every poll inside the 06:00-06:02 window, so if the spread
+         narrows in time the straddle is still placed; otherwise no trade today.
+         Set SPREAD_MAX = None to disable.
+TP/SL  : $10 / $5 from the REAL fill price (re-anchored after fill, so
+         entry slippage doesn't distort the 2:1 shape).
+Exit   : TP, SL, or hard close at 08:00 UTC — whatever is still open or
+         pending at 08:00 (own MAGIC only) is closed / cancelled.
 Backup : Pending stops are sent with ORDER_TIME_DAY when the symbol supports
          it (symbol_info().expiration_mode bit 2), so if the bot is OFFLINE
-         at 07:00 the broker still cancels any unfilled stop at the end of
+         at 08:00 the broker still cancels any unfilled stop at the end of
          the trading day instead of leaving it live forever. Falls back to
          GTC if DAY isn't supported, or if the broker rejects it with 10022
          'Invalid expiration' (the error the spike bot hit with
          ORDER_TIME_SPECIFIED) — placement can never fail because of the
-         backup. The bot's own 07:00 cancel remains the main mechanism.
+         backup. The bot's own 08:00 cancel remains the main mechanism.
 Sizing : RISK_PCT of balance per trade (lot = balance * risk / ($5 SL value)),
-         clamped to the broker's volume_min/step/max. Below ~$250 balance this
-         is always 0.01 lot (~$5 risk).
-Kill switch (backtested, see BACKTEST below):
+         clamped to the broker's volume_min/step/max. Risk per trade is
+         unchanged from the 1:1 version because the stop is still $5.
+Kill switch (re-sized for the 2:1 version, see BACKTEST below):
          Stop placing NEW trades if, counting this strategy's own closed
          trades since KILL_RESET_AFTER:
-           - the last 40 trades won fewer than 50%, OR
-           - the last 8 trades were all losses.
+           - the last 80 trades won fewer than 33%, OR
+           - the last 12 trades were all losses.
          Open trades are still managed and closed normally. To resume after
          a review, set KILL_RESET_AFTER to the review date — only trades
          after it are counted. Fully derived from MT5 deal history.
 
-BACKTEST (2026-10-03, real Exness data, spread included):
-  - Ticks, 49 days Jan 2025-Jul 2026 (0.7s latency): 71% wins, +$86/0.01 lot
-  - M1, every day 13 Aug-2 Oct 2026 (cautious bar ordering): 74% wins,
-    +$85/0.01 lot; unseen last-2-weeks test 70% wins.
-  - Combined 84 trades: 72.6% wins, avg +$2.04/trade/0.01 lot, worst -$5.24.
-  - 06:00 is specific: neighbouring hours 04:00/05:00/07:00 failed the same
-    tick test (0-2 of 54 setups profitable vs 46/54 at 06:00).
-  - Breakeven win rate incl. spread ~53%.
-  - Kill switch: wrongly stops a working (72%) strategy within a year ~3%;
-    stops a dead (53%) one 100% of the time after a median 55 trades; a
-    45%-win strategy is stopped after ~40 trades at about -6R.
-  - Tested and REJECTED for this style: XAGUSDm, GBPUSDm, USDJPYm, BTCUSDm
-    (negative on average at every hour), US30m (03:00 weak; 13:30 untestable
-    on M1). Gold only.
+BACKTEST (2026-10-06, real Exness tick data, spread included, 0.01 lot):
+  - Feb, Mar, Apr, Jun, Jul, Aug 2026, every trading day.
+  - This version ($2 / SL $5 / TP $10 / close 08:00 / spread <= $0.28):
+    103 trades, 49% wins, +$234. Per month: Feb +47, Mar +40, Apr -9,
+    Jun +70, Jul +41, Aug +45. Worst losing streak 7.
+  - Previous version ($2 / SL $5 / TP $5 / close 07:00, no filter):
+    129 trades, 57% wins, +$76. Per month: Feb +31, Mar -11, Apr -10,
+    Jun +20, Jul +20, Aug +25.
+  - Leave-one-month-out check (choose settings on 5 months, test on the
+    6th): the same settings were picked every time; held-out total 40.6R
+    vs 15.3R for the previous version; better or equal in every held-out month.
+  - Breakeven win rate at 2:1 incl. spread ~35%.
+  - Spread filter only had Feb-Apr to work with (Jun-Aug never had a 06:00
+    spread above $0.28), so treat it as the least proven piece.
+  - Tested and NOT helpful: entering at 06:05, trading the 06:00-06:05
+    direction, requiring a busy first 5 minutes, skipping Mondays.
+  - Kill switch (simulated, 250 trades): wrongly stops a healthy 48%-win
+    strategy ~9% of the time; stops a breakeven (35%) one ~95% of the time
+    after a median ~85 trades. The old 40-trade / 50% rule would have
+    tripped constantly at this win rate.
 
-KNOWN LIMITS: M1 sample is only 7 weeks; tick sample is news days only.
-Not yet validated on every day of 2024-2026 at M1/M5 resolution.
+KNOWN LIMITS: 6 months only (May not tested). 2:1 version not yet run live.
 *** DEMO FIRST ***
 """
 
@@ -68,27 +77,31 @@ MAGIC = 20261003  # must not collide: straddle 20260716, spike 20260807,
 
 ENTRY_HOUR = 6  # 06:00 UTC, quiet pre-London hour
 ENTRY_WINDOW_SECONDS = 120  # place only between 06:00:00 and 06:02:00 UTC
-CLOSE_HOUR = 7  # everything own-MAGIC is closed/cancelled from 07:00 UTC
+CLOSE_HOUR = 8  # everything own-MAGIC is closed/cancelled from 08:00 UTC
 
 OFFSET = 2.0  # $ from 06:00 mid to each stop order
-TP = 5.0  # $ from real fill
+TP = 10.0  # $ from real fill (2x the stop)
 SL = 5.0  # $ from real fill
 DECIMALS = 2
 
+SPREAD_MAX: Optional[float] = 0.28  # $; skip placing while ask - bid is wider. None = off
+
 RISK_PCT = 6.0
 
-# Kill switch (backtested — see module docstring)
-KILL_WINDOW = 40
-KILL_MIN_WIN_RATE = 0.50
-KILL_MAX_LOSS_STREAK = 8
-KILL_RESET_AFTER: Optional[datetime.datetime] = None  # e.g.
-# datetime.datetime(2026, 12, 1, tzinfo=datetime.timezone.utc) after a review
+# Kill switch (re-sized for the 2:1 version — see module docstring)
+KILL_WINDOW = 80
+KILL_MIN_WIN_RATE = 0.33
+KILL_MAX_LOSS_STREAK = 12
+# Only trades after this moment count. Set it to the day you deploy this
+# version so the old 1:1 trades (same MAGIC) don't mix into the stats.
+KILL_RESET_AFTER: Optional[datetime.datetime] = datetime.datetime(
+    2026, 10, 7, tzinfo=datetime.timezone.utc)
 KILL_LOOKBACK_DAYS = 365
 
 COMMENT_ENTRY = "scalp06_entry"
 COMMENT_CLOSE = "scalp06_close"
 COMMENT_FIX = "scalp06_fix"
-EXIT_DEVIATION = 200  # points; max tolerance on the 07:00 market close
+EXIT_DEVIATION = 200  # points; max tolerance on the 08:00 market close
 
 
 # ORDER_TIME_DAY should exist in the MetaTrader5 package, but this project has
@@ -257,6 +270,10 @@ class Scalp0600Strategy:
         if age > datetime.timedelta(minutes=10):
             return f"Market likely closed — last tick {age} old"
 
+        spread = tick.ask - tick.bid
+        if SPREAD_MAX is not None and spread > SPREAD_MAX:
+            return f"Spread ${spread:.2f} above ${SPREAD_MAX:.2f} — waiting (no trade if it stays wide past 06:02)"
+
         mid = (tick.bid + tick.ask) / 2.0
         buy_stop, sell_stop = _round(mid + OFFSET), _round(mid - OFFSET)
         lots = self._lot()
@@ -274,7 +291,7 @@ class Scalp0600Strategy:
                 "type": otype, "price": price, "sl": sl, "tp": tp, "magic": MAGIC,
                 "comment": COMMENT_ENTRY,
                 # DAY = broker-side backup expiry (end of trading day) in case
-                # the bot is offline at 07:00. Never SPECIFIED — Exness
+                # the bot is offline at 08:00. Never SPECIFIED — Exness
                 # rejected short SPECIFIED expirations (10022) on the spike bot.
                 "type_time": time_type, "type_filling": filling,
             }
@@ -296,7 +313,8 @@ class Scalp0600Strategy:
                     self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": t}, "rollback")
             return "Order send failed — rolled back"
         expiry = "DAY expiry" if all(t == ORDER_TIME_DAY for t in used_types) else "GTC"
-        return f"Straddle placed: buy {buy_stop} / sell {sell_stop}, {lots} lots ({expiry} + 07:00 cancel)"
+        return (f"Straddle placed: buy {buy_stop} / sell {sell_stop}, {lots} lots, "
+                f"spread ${spread:.2f} ({expiry} + {CLOSE_HOUR:02d}:00 cancel)")
 
     # ------------------------------------------------------------ management
     def _close_position(self, pos) -> bool:
@@ -328,8 +346,8 @@ class Scalp0600Strategy:
         return f"ticket {pos.ticket}: TP/SL -> {want_tp}/{want_sl}" if self._ok(res) else None
 
     def manage(self, now: Optional[datetime.datetime] = None) -> List[str]:
-        """Call every poll. OCO cancel, TP/SL re-anchor, and the 07:00 cleanup.
-        Outside 06:00-07:00 anything own-MAGIC still around is closed — so a
+        """Call every poll. OCO cancel, TP/SL re-anchor, and the 08:00 cleanup.
+        Outside 06:00-08:00 anything own-MAGIC still around is closed — so a
         restart at any time can never leave a scalp hanging."""
         now = now or _utc_now()
         msgs: List[str] = []
@@ -338,10 +356,10 @@ class Scalp0600Strategy:
 
         if not in_session:
             for p in positions:
-                msgs.append(f"07:00 close ticket {p.ticket}: {'ok' if self._close_position(p) else '!! FAILED'}")
+                msgs.append(f"{CLOSE_HOUR:02d}:00 close ticket {p.ticket}: {'ok' if self._close_position(p) else '!! FAILED'}")
             for o in orders:
                 ok = self._ok(self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": o.ticket}, "cancel"))
-                msgs.append(f"07:00 cancel order {o.ticket}: {'ok' if ok else '!! FAILED'}")
+                msgs.append(f"{CLOSE_HOUR:02d}:00 cancel order {o.ticket}: {'ok' if ok else '!! FAILED'}")
             return msgs
 
         # OCO: a position on one side cancels the pending order on the other
@@ -361,7 +379,8 @@ class Scalp0600Strategy:
         return msgs
 
     def __repr__(self) -> str:
+        spread = f"spread <= ${SPREAD_MAX}" if SPREAD_MAX is not None else "no spread filter"
         return (f"Scalp0600Strategy({SYMBOL} {ENTRY_HOUR:02d}:00 UTC, +/-${OFFSET} stops, "
-                f"TP ${TP} / SL ${SL}, close {CLOSE_HOUR:02d}:00, risk {RISK_PCT}%, "
+                f"TP ${TP} / SL ${SL}, close {CLOSE_HOUR:02d}:00, {spread}, risk {RISK_PCT}%, "
                 f"kill: last {KILL_WINDOW} < {KILL_MIN_WIN_RATE:.0%} or {KILL_MAX_LOSS_STREAK} losses in a row, "
                 f"magic {MAGIC})")
