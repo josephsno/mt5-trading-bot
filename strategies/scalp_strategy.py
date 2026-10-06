@@ -66,7 +66,7 @@ SYMBOL = "XAUUSDm"
 MAGIC = 20261003  # must not collide: straddle 20260716, spike 20260807,
 # confirm 20260801, reload 20260810
 
-ENTRY_HOUR = 6
+ENTRY_HOUR = 6  # 06:00 UTC, quiet pre-London hour
 ENTRY_WINDOW_SECONDS = 120  # place only between 06:00:00 and 06:02:00 UTC
 CLOSE_HOUR = 7  # everything own-MAGIC is closed/cancelled from 07:00 UTC
 
@@ -75,7 +75,7 @@ TP = 5.0  # $ from real fill
 SL = 5.0  # $ from real fill
 DECIMALS = 2
 
-RISK_PCT = 2.0
+RISK_PCT = 6.0
 
 # Kill switch (backtested — see module docstring)
 KILL_WINDOW = 40
