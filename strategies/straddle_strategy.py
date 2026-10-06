@@ -346,6 +346,18 @@ USTEC_MIN_BALANCE = 200.0
 US30_ENABLED = True
 US30_MIN_BALANCE = 200.0
 
+# Only these symbols get new straddles. Everything else stays configured
+# so any position already open on it is still managed until it closes.
+ACTIVE_SYMBOLS = {
+    "XAUUSDm",
+    "USDJPYm",
+    "US30m",
+    "BTCUSDm",
+    "EURUSDm",
+    # "XAGUSDm",  # also needs SILVER_ENABLED=True below to actually trade
+    # "USTECm",   # off 2026-10-06: negative every month Aug-Oct
+    # "GBPUSDm",  # off 2026-10-06: biggest loser, -$45.96 Jul-Oct
+}
 MAGIC = 20260716  # unique to this strategy, keeps it from colliding with the M15 bot
 
 DEADLINE_BUFFER_HOURS = 1  # how far ahead of the NEXT trigger hour a trade
@@ -446,7 +458,8 @@ class StraddleStrategy:
         self.traded_symbols: List[str] = [
             s
             for s in SYMBOL_CONFIG
-            if (s != "XAUUSDm" or GOLD_ENABLED)
+            if s in ACTIVE_SYMBOLS
+            and (s != "XAUUSDm" or GOLD_ENABLED)
             and (s != "BTCUSDm" or BTC_ENABLED)
             and (s != "XAGUSDm" or SILVER_ENABLED)
             and (s != "USTECm" or USTEC_ENABLED)

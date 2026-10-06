@@ -23,6 +23,11 @@ LIVE = True
 STRADDLE_MAGIC = 20260716  # straddle_strategy.py's own MAGIC constant
 
 
+def costs(d):
+    """Commission + swap + fee for a deal (usually negative)."""
+    return d.commission + d.swap + getattr(d, "fee", 0.0)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=365)
@@ -40,15 +45,13 @@ def main():
         print("MT5 failed to start")
         return
 
-    # ---- THE FIX: no group= parameter, filter in Python instead ----
+    # ---- no group= parameter, filter in Python instead ----
     since = datetime.now(timezone.utc) - timedelta(days=args.days)
     now = datetime.now(timezone.utc)
     deals = mt5.history_deals_get(since, now) or ()
 
-    straddle_closes = [
-        d for d in deals
-        if d.magic == STRADDLE_MAGIC and d.entry == mt5.DEAL_ENTRY_OUT
-    ]
+    straddle_deals = [d for d in deals if d.magic == STRADDLE_MAGIC]
+    straddle_closes = [d for d in straddle_deals if d.entry == mt5.DEAL_ENTRY_OUT]
 
     print(f"\nSTRADDLE STRATEGY (magic={STRADDLE_MAGIC}) — closed trades, last {args.days} days")
     print(f"Total: {len(straddle_closes)}\n")
@@ -67,13 +70,76 @@ def main():
         t = datetime.fromtimestamp(d.time, tz=timezone.utc)
         print(f"  {t}  {d.symbol:10s}  {outcome}  profit={d.profit:>8.2f}  comment='{d.comment}'")
 
+    total_costs = sum(costs(d) for d in straddle_deals)
+
     print(f"\n{'='*60}")
     print(f"OVERALL")
     print(f"Total trades: {len(straddle_closes)}")
     print(f"Wins: {wins}   Losses: {losses}   Break-even: {len(straddle_closes)-wins-losses}")
     if straddle_closes:
         print(f"Win rate: {wins/len(straddle_closes)*100:.1f}%")
-    print(f"Total P&L: ${total_pnl:,.2f}")
+    print(f"Gross P&L: ${total_pnl:,.2f}")
+    print(f"Costs (commission/swap/fee): ${total_costs:,.2f}")
+    print(f"Net P&L: ${total_pnl + total_costs:,.2f}")
+
+    # ---- per-month breakdown ----
+    by_month = {}
+    for d in straddle_deals:
+        key = datetime.fromtimestamp(d.time, tz=timezone.utc).strftime("%Y-%m")
+        m = by_month.setdefault(key, {"trades": 0, "wins": 0, "losses": 0,
+                                      "gross": 0.0, "costs": 0.0})
+        m["costs"] += costs(d)
+        if d.entry == mt5.DEAL_ENTRY_OUT:
+            m["trades"] += 1
+            m["gross"] += d.profit
+            if d.profit > 0:
+                m["wins"] += 1
+            elif d.profit < 0:
+                m["losses"] += 1
+
+    print(f"\n{'='*60}")
+    print("BY MONTH")
+    print(f"  {'Month':8s} {'Trades':>6s} {'W':>4s} {'L':>4s} {'Win%':>6s} "
+          f"{'Gross':>11s} {'Costs':>10s} {'Net':>11s} {'Running':>11s}")
+    running = 0.0
+    for month in sorted(by_month):
+        m = by_month[month]
+        net = m["gross"] + m["costs"]
+        running += net
+        win_pct = m["wins"] / m["trades"] * 100 if m["trades"] else 0.0
+        print(f"  {month:8s} {m['trades']:>6d} {m['wins']:>4d} {m['losses']:>4d} {win_pct:>5.1f}% "
+              f"{m['gross']:>11,.2f} {m['costs']:>10,.2f} {net:>11,.2f} {running:>11,.2f}")
+
+    if by_month:
+        nets = {k: v["gross"] + v["costs"] for k, v in by_month.items()}
+        best_month = max(nets.items(), key=lambda kv: kv[1])
+        worst_month = min(nets.items(), key=lambda kv: kv[1])
+        green = sum(1 for v in nets.values() if v > 0)
+        print(f"\n  Best month:  {best_month[0]}  ${best_month[1]:,.2f}")
+        print(f"  Worst month: {worst_month[0]}  ${worst_month[1]:,.2f}")
+        print(f"  Profitable months: {green}/{len(nets)}")
+        print(f"  Avg net per month: ${sum(nets.values()) / len(nets):,.2f}")
+
+    # ---- per-month, per-symbol breakdown ----
+    month_sym = {}
+    for d in straddle_deals:
+        month = datetime.fromtimestamp(d.time, tz=timezone.utc).strftime("%Y-%m")
+        s = month_sym.setdefault(month, {}).setdefault(
+            d.symbol, {"trades": 0, "wins": 0, "net": 0.0})
+        s["net"] += costs(d)
+        if d.entry == mt5.DEAL_ENTRY_OUT:
+            s["trades"] += 1
+            s["net"] += d.profit
+            if d.profit > 0:
+                s["wins"] += 1
+
+    print(f"\n{'='*60}")
+    print("SYMBOL RANKING PER MONTH (best → worst)")
+    for month in sorted(month_sym):
+        ranked = sorted(month_sym[month].items(), key=lambda kv: kv[1]["net"], reverse=True)
+        print(f"\n  {month}")
+        for i, (sym, s) in enumerate(ranked, 1):
+            print(f"    {i:>2}. {sym:12s} ${s['net']:>9,.2f}  ({s['trades']} trades)")
 
     # ---- per-symbol breakdown ----
     by_symbol = {}
