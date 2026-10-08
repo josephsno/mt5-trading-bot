@@ -353,7 +353,7 @@ ACTIVE_SYMBOLS = {
     "USDJPYm",
     "US30m",
     "BTCUSDm",
-    "EURUSDm",
+    # "EURUSDm",
     # "XAGUSDm",  # also needs SILVER_ENABLED=True below to actually trade
     # "USTECm",   # off 2026-10-06: negative every month Aug-Oct
     # "GBPUSDm",  # off 2026-10-06: biggest loser, -$45.96 Jul-Oct
