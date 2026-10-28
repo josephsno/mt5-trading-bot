@@ -193,8 +193,23 @@ class IndexDipStrategy:
     def __init__(self, fallback_balance: float = 200.0) -> None:
         self.fallback_balance = fallback_balance
         self.setups = enabled_setups()
+        # Put every symbol in Market Watch up front and say so loudly if a
+        # name doesn't exist on this server (demo/live names can differ).
+        for s in self.setups:
+            if not self._ensure_symbol(s["symbol"]):
+                print(f"  WARNING: {s['name']}: symbol '{s['symbol']}' NOT FOUND on this server "
+                      f"— check the name in Market Watch. It will be skipped until it exists.")
 
     # ------------------------------------------------------------ MT5 helpers
+    def _ensure_symbol(self, symbol: str) -> bool:
+        """copy_rates_*() / symbol_info_tick() can come back empty for a symbol
+        that isn't in Market Watch (2026-07-21 GBPUSDm miss). symbol_select()
+        adds it. False = the symbol doesn't exist on this server at all."""
+        info = mt5.symbol_info(symbol)
+        if info is not None and getattr(info, "visible", True):
+            return True
+        return bool(mt5.symbol_select(symbol, True))
+
     def _tick(self, symbol: str):
         """symbol_info_tick() returns None for a symbol not in Market Watch;
         symbol_select() adds it (2026-07-21 GBPUSDm miss)."""
@@ -329,6 +344,9 @@ class IndexDipStrategy:
         positions = self._positions(s)
         if not positions:
             return msgs
+        if not self._ensure_symbol(s["symbol"]):
+            return [f"Symbol '{s['symbol']}' not found on this server — cannot manage "
+                    f"{len(positions)} open position(s)"]
         due = last_check_at_or_before(now)
         for pos in positions:
             if _ts(pos.time) >= due:
@@ -353,6 +371,8 @@ class IndexDipStrategy:
         check_at = last_check_at_or_before(now)
         if now >= check_at + datetime.timedelta(minutes=CHECK_WINDOW_MINUTES):
             return "Outside check window"
+        if not self._ensure_symbol(sym):
+            return f"Symbol '{sym}' not found on this server — check the name in Market Watch"
 
         if self._positions(s):
             return "Position still open (exit pending) — no new entry"
