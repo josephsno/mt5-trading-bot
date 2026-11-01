@@ -11,7 +11,10 @@ Once a day, Monday-Friday, at 19:00 UTC (20:00 Lagos):
   2. BREAKER: if this index had a LOSING trade entered this calendar month,
              it takes no more trades until the 1st (per index, independent).
   3. SIGNAL: build "daily" closes from the H1 bar that ends at 19:00 UTC on
-             each weekday; RSI(2) of those closes < 5  ->  BUY.
+             each weekday; RSI(2) of those closes < 5  ->  BUY. Decided from
+             19:01, never at 19:00:00, and only on history that passes checks
+             (warmed up 18:50-18:59, two identical reads, the 19:00 bar has
+             started, no big gaps, fresh D1) — else "will retry" next poll.
   4. SIZE  : lot = balance * risk% / (ATR14(D1) * $ per 1.0 move per lot),
              rounded DOWN to volume_step; if below the symbol's volume_min
              (read live from MT5), the minimum lot is used and flagged.
@@ -64,13 +67,15 @@ import MetaTrader5 as mt5
 # ---------------------------------------------------------------------------
 # MAGICs in use elsewhere: straddle 20260716, spike 20260807, confirm 20260801,
 # reload 20260810, gold scalp 20261003, USTEC_E 20261009, USTEC_A 20261010,
-# GOLD_0000 20261011, GOLD_0100 20261012.
+# GOLD_0000 20261011, GOLD_0100 20261012, USTEC reopen straddle 20261030.
 SETUPS: List[Dict[str, Any]] = [
     {"name": "DIP_US30",  "enabled": True,  "symbol": "US30m",  "magic": 20261028,
      "risk_pct": 1.0, "comment": "dip_us30"},
     {"name": "DIP_USTEC", "enabled": True,  "symbol": "USTECm", "magic": 20261029,
      "risk_pct": 1.0, "comment": "dip_ustec"},
-    {"name": "DIP_JP225", "enabled": True,  "symbol": "JP225m", "magic": 20261030,
+    # magic moved off 20261030 (also used by the USTEC reopen straddle). Switch only
+    # while no JP225 dip position is open, or the old position won't be managed.
+    {"name": "DIP_JP225", "enabled": True,  "symbol": "JP225m", "magic": 20261033,
      "risk_pct": 1.0, "comment": "dip_jp225"},
     {"name": "DIP_DE30",  "enabled": True,  "symbol": "DE30m",  "magic": 20261031,
      "risk_pct": 1.0, "comment": "dip_de30"},
@@ -81,7 +86,14 @@ SETUPS: List[Dict[str, Any]] = [
 
 CHECK_HOUR = 19                 # UTC. 18:00-20:00 all tested fine; 19:00 is the middle
 CHECK_MINUTE = 0
-CHECK_WINDOW_MINUTES = 10       # entries only in 19:00-19:10 (covers a missed poll)
+CHECK_WINDOW_MINUTES = 10       # entries only in 19:01-19:10 (covers a missed poll)
+ENTRY_DELAY_MINUTES = 1         # broker time; never decide at 19:00:00 — the 18:00 H1 bar may not be final
+                                # and history may still be syncing (29 Oct: US30 RSI read 85.58
+                                # at 19:00:00, 18.21 at 19:01 on the SAME close)
+PRIME_MINUTES = 10              # 18:50-18:59: fetch H1/D1 every poll so MT5 syncs history first
+MAX_MISSING_DAYS = 1            # of the broker's last 20 TRADING days (from D1) without an 18:00 bar
+                                # (allows one early-close day; holidays have no D1 bar so don't count)
+MIN_SERIES_DAYS = 30            # RSI(2) warm-up is ~10 days; 30 is ample
 RSI_PERIOD = 2
 RSI_THRESHOLD = 5.0             # buy when RSI(2) < 5
 ATR_PERIOD = 14                 # D1, simple mean of true range (as backtested)
@@ -91,6 +103,8 @@ ENTRY_DEVIATION = 200           # points
 EXIT_DEVIATION = 500            # points — exits must not be refused
 BREAKER_LOOKBACK_DAYS = 10      # deals fetched from before the 1st (cross-month positions)
 DISASTER_SL_ATR = 3.0           # stop at fill - 3 x ATR14; 0 = no stop at all
+PRICE_CHECK_PCT = 0.3           # 18:00-bar close must be within 0.3% of the 19:00 open
+                                # (and 0.9% of the live bid) or the read is treated as bad
 
 
 def enabled_setups() -> List[Dict[str, Any]]:
@@ -105,23 +119,31 @@ def _ts(seconds: int) -> datetime.datetime:
 # Clock: reason in broker time, not the VPS clock (VPS was seen 64s off once)
 # ---------------------------------------------------------------------------
 _skew: Dict[str, Any] = {"value": datetime.timedelta(0), "checked": None}
+SKEW_MIN_SECONDS = 30   # a tick's time is when the LAST trade happened, not "now": on quiet
+                        # indices it is often 5-15 s old (29 Oct log). Only a gap this big
+                        # is treated as a real VPS clock error (the one seen was 64 s).
 
 
 def _utc_now() -> datetime.datetime:
     local = datetime.datetime.now(datetime.timezone.utc)
     last = _skew["checked"]
     if last is None or (local - last).total_seconds() >= 60:
+        # freshest tick across all symbols = best estimate of broker "now"
+        newest = None
         for sym in dict.fromkeys(s["symbol"] for s in enabled_setups()):
             tick = mt5.symbol_info_tick(sym)
-            if tick is None:
-                continue
-            skew = _ts(tick.time) - local
-            # only trust it when the tick is fresh (market open)
-            if abs(skew.total_seconds()) < 600:
-                if abs(skew.total_seconds()) > 5:
-                    print(f"  WARNING: VPS clock {skew.total_seconds():+.1f}s off broker — correcting")
-                _skew["value"] = skew
-                break
+            if tick is not None and tick.time_msc:
+                t = datetime.datetime.fromtimestamp(tick.time_msc / 1000, tz=datetime.timezone.utc)
+                newest = t if newest is None or t > newest else newest
+        new_skew = datetime.timedelta(0)
+        if newest is not None:
+            skew = newest - local
+            if SKEW_MIN_SECONDS <= abs(skew.total_seconds()) < 600:
+                new_skew = skew
+        if abs((new_skew - _skew["value"]).total_seconds()) >= 1:
+            print(f"  WARNING: VPS clock {new_skew.total_seconds():+.1f}s off broker — correcting"
+                  if new_skew else "  VPS clock back in line with broker — correction removed")
+        _skew["value"] = new_skew
         _skew["checked"] = local
     return local + _skew["value"]
 
@@ -315,9 +337,30 @@ class IndexDipStrategy:
         }, f"{s['name']} close ticket {pos.ticket}")
         return self._ok(res)
 
-    def _atr(self, symbol: str) -> Optional[float]:
+    def _atr(self, symbol: str, now: Optional[datetime.datetime] = None) -> Optional[float]:
         d1 = mt5.copy_rates_from_pos(symbol, mt5.TIMEFRAME_D1, 1, ATR_PERIOD + 1)  # completed days
+        if d1 is None or len(d1) == 0:
+            return None
+        # stale-history guard: the last COMPLETED day must be recent
+        if now is not None and now - _ts(int(d1[-1]["time"])) > datetime.timedelta(days=5):
+            return None
         return atr_simple(d1)
+
+    def _h1(self, symbol: str, now: datetime.datetime):
+        return mt5.copy_rates_range(symbol, mt5.TIMEFRAME_H1,
+                                    now - datetime.timedelta(days=HISTORY_DAYS), now)
+
+    def prime(self, s: Dict[str, Any], now: Optional[datetime.datetime] = None) -> None:
+        """18:50-18:59 UTC: request the same history the 19:00 check will use, so
+        MT5 has synced it before the decision (the first request after hours of
+        no charts can return a partial/stale set and start a download)."""
+        now = now or _utc_now()
+        check_at = last_check_at_or_before(now + datetime.timedelta(minutes=PRIME_MINUTES))
+        if not (check_at - datetime.timedelta(minutes=PRIME_MINUTES) <= now < check_at):
+            return
+        if self._ensure_symbol(s["symbol"]):
+            self._h1(s["symbol"], now)
+            mt5.copy_rates_from_pos(s["symbol"], mt5.TIMEFRAME_D1, 1, ATR_PERIOD + 1)
 
     def _set_disaster_sl(self, s: Dict[str, Any], pos, atr: Optional[float] = None) -> str:
         """SL = fill price - DISASTER_SL_ATR x ATR14, anchored to the REAL fill
@@ -338,8 +381,9 @@ class IndexDipStrategy:
         """Call every poll, for every setup, BEFORE check_and_place.
         Closes any position opened before the latest weekday 19:00 check
         (held one trading day). If the market is closed, retries next poll.
-        Adds the disaster stop to any own position that has none (self-heal)."""
-        now = now or _utc_now()
+        Adds the disaster stop to any own position that has none (self-heal).
+        Uses BROKER time (last tick), not the VPS clock."""
+        now = self._broker_now(s["symbol"])   # broker time; passed-in `now` ignored
         msgs: List[str] = []
         positions = self._positions(s)
         if not positions:
@@ -364,50 +408,104 @@ class IndexDipStrategy:
         return msgs
 
     # ------------------------------------------------------------ entry
+    def _broker_now(self, symbol: str) -> datetime.datetime:
+        """Broker time from the symbol's last tick — the VPS clock is never used for
+        the decision (29 Oct 2026: a BUY was sent at broker 19:00:03 on a bad read)."""
+        tick = self._tick(symbol)
+        if tick is not None and tick.time_msc:
+            return datetime.datetime.fromtimestamp(tick.time_msc / 1000, tz=datetime.timezone.utc)
+        return _utc_now()
+
+    def signal_for(self, s: Dict[str, Any], check_at: datetime.datetime) -> Dict[str, Any]:
+        """Look BACK at finished bars only: the 19:00 price of each weekday is the
+        close of the H1 bar that opened at 18:00. Same answer whenever it is run
+        after 19:00. Returns a dict; 'ok' False means history not trustworthy yet."""
+        sym = s["symbol"]
+        out: Dict[str, Any] = {"ok": False, "why": "", "check_at": check_at}
+        start = check_at - datetime.timedelta(days=HISTORY_DAYS)
+        h1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_H1, start, check_at)
+        h1b = mt5.copy_rates_range(sym, mt5.TIMEFRAME_H1, start, check_at)
+        if h1 is None or len(h1) == 0 or h1b is None or len(h1b) != len(h1) \
+                or int(h1[-1]["time"]) != int(h1b[-1]["time"]):
+            out["why"] = "H1 history not ready (empty or two reads differ)"
+            return out
+        series = closes_at_check_hour(h1, check_at)
+        if not series or series[-1][0] != check_at.date():
+            out["why"] = f"no finished 18:00 bar for {check_at:%a %d %b} in history yet"
+            return out
+        # every weekday the broker traded (D1 bar exists) in the last 20 must be present
+        d1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_D1, check_at - datetime.timedelta(days=40), check_at)
+        traded = sorted({_ts(int(b["time"])).date() for b in (d1 if d1 is not None else [])
+                         if _ts(int(b["time"])).weekday() < 5 and _ts(int(b["time"])).date() < check_at.date()})[-20:]
+        have = {d for d, _ in series}
+        missing = [d for d in traded if d not in have]
+        if len(traded) < 15 or len(missing) > MAX_MISSING_DAYS:
+            out["why"] = (f"history incomplete: {len(missing)} trading day(s) without an 18:00 bar "
+                          f"({', '.join(f'{d:%d %b}' for d in missing[:5])})")
+            return out
+        closes = [c for _, c in series]
+        rsi = rsi_last(closes)
+        if rsi is None:
+            out["why"] = f"not enough history for RSI ({len(series)} days)"
+            return out
+        out.update(ok=True, rsi=rsi, close_19=closes[-1], last5=series[-5:], days=len(series))
+        return out
+
+    @staticmethod
+    def _report(s: Dict[str, Any], sig: Dict[str, Any], verdict: str, extra: str = "") -> str:
+        lines = [f"[{s['name']}] {s['symbol']}  check {sig['check_at']:%a %d %b %Y 19:00} UTC (broker)"]
+        if sig.get("ok"):
+            lines.append("   19:00 prices: " + " | ".join(f"{d:%a %d %b} {c:,.2f}" for d, c in sig["last5"]))
+            lines.append(f"   RSI(2) = {sig['rsi']:.2f}   (buy only if < {RSI_THRESHOLD:g})   history {sig['days']} days")
+        lines.append(f"   => {verdict}")
+        if extra:
+            lines.append("   " + extra)
+        return "\n".join(lines)
+
     def check_and_place(self, s: Dict[str, Any],
                         now: Optional[datetime.datetime] = None) -> str:
-        now = now or _utc_now()
         sym = s["symbol"]
-        check_at = last_check_at_or_before(now)
-        if now >= check_at + datetime.timedelta(minutes=CHECK_WINDOW_MINUTES):
-            return "Outside check window"
         if not self._ensure_symbol(sym):
-            return f"Symbol '{sym}' not found on this server — check the name in Market Watch"
-
+            return f"[{s['name']}] symbol '{sym}' not found on this server — check Market Watch"
+        bnow = self._broker_now(sym)   # always BROKER time; a `now` passed in by the runner is ignored
+        check_at = last_check_at_or_before(bnow)
+        if not (check_at + datetime.timedelta(minutes=ENTRY_DELAY_MINUTES) <= bnow
+                < check_at + datetime.timedelta(minutes=CHECK_WINDOW_MINUTES)):
+            return "Outside check window"
+        sig: Dict[str, Any] = {"check_at": check_at}
         if self._positions(s):
-            return "Position still open (exit pending) — no new entry"
-        if any(d.entry == mt5.DEAL_ENTRY_IN for d in self._own_deals(s, check_at, now)):
-            return "Already traded at this check"
-        blocked = self._lost_this_month(s, now)
+            return self._report(s, sig, "NO TRADE — position still open (exit pending)")
+        if any(d.entry == mt5.DEAL_ENTRY_IN for d in self._own_deals(s, check_at, bnow)):
+            return self._report(s, sig, "NO TRADE — already traded at this check")
+        blocked = self._lost_this_month(s, bnow)
         if blocked:
-            return f"BREAKER: {blocked} — no trades until the 1st"
-
-        tick, why = self._fresh_tick(s, now)
+            return self._report(s, sig, f"NO TRADE — BREAKER: {blocked}; off until the 1st")
+        tick, why = self._fresh_tick(s, bnow)
         if tick is None:
-            return why
+            return self._report(s, sig, f"WAIT — {why}")
 
-        # --- signal: RSI(2) of the 19:00 closes
-        h1 = mt5.copy_rates_range(sym, mt5.TIMEFRAME_H1,
-                                  now - datetime.timedelta(days=HISTORY_DAYS), now)
-        if h1 is None or len(h1) == 0:
-            return f"No H1 bars — {mt5.last_error()}"
-        series = closes_at_check_hour(h1, now)
-        if not series or series[-1][0] != check_at.date():
-            return f"No completed 19:00 bar for {check_at:%d %b} yet"
-        rsi = rsi_last([c for _, c in series])
-        if rsi is None:
-            return f"Not enough history for RSI ({len(series)} days)"
-        close_19 = series[-1][1]
+        sig = self.signal_for(s, check_at)
+        if not sig["ok"]:
+            return self._report(s, sig, f"WAIT — {sig['why']} — will retry")
+        close_19, rsi = sig["close_19"], sig["rsi"]
+        # history must agree with the live market (stale/half-synced data fails this)
+        cur = mt5.copy_rates_from_pos(sym, mt5.TIMEFRAME_H1, 0, 1)
+        live_open = float(cur[0]["open"]) if cur is not None and len(cur) else tick.bid
+        tol = max(close_19, tick.bid) * PRICE_CHECK_PCT / 100.0
+        if abs(close_19 - live_open) > tol or abs(close_19 - tick.bid) > 3 * tol:
+            return self._report(s, sig, "WAIT — history does not match live price — will retry",
+                                f"19:00 close {close_19:,.2f} vs 19:00 open {live_open:,.2f} / bid {tick.bid:,.2f}")
         if rsi >= RSI_THRESHOLD:
-            return f"19:00 close {close_19:,.2f}  RSI(2) {rsi:.2f}  -> no signal"
+            return self._report(s, sig, "NO TRADE")
+        now = bnow
 
         # --- size
-        atr = self._atr(sym)
+        atr = self._atr(sym, now)
         if not atr:
-            return f"SIGNAL (RSI {rsi:.2f}) but ATR unavailable — skipped"
+            return self._report(s, sig, "WAIT — SIGNAL, but ATR / D1 history unavailable — will retry")
         lot, risk_usd, forced = self._lot(s, atr)
         if lot <= 0:
-            return f"SIGNAL (RSI {rsi:.2f}) but lot size failed — skipped"
+            return self._report(s, sig, "NO TRADE — SIGNAL, but lot size failed")
 
         # --- order: market BUY, no TP. The disaster SL is added right after
         # the fill, anchored to the real fill price (manage() re-adds it if
@@ -420,7 +518,7 @@ class IndexDipStrategy:
             "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(sym),
         }, f"{s['name']} BUY")
         if not self._ok(res):
-            return f"SIGNAL (RSI {rsi:.2f}) but BUY failed"
+            return self._report(s, sig, "SIGNAL, but BUY was REJECTED — see the line above")
         note = "  [MIN LOT — risk above target]" if forced else ""
         sl_msg = ""
         if DISASTER_SL_ATR > 0:
@@ -428,9 +526,8 @@ class IndexDipStrategy:
                 or (self._positions(s) or [None])[-1]
             sl_msg = ("\n   " + self._set_disaster_sl(s, pos, atr)) if pos is not None \
                 else "\n   Disaster SL: position not visible yet — manage() will add it"
-        return (f"SIGNAL 19:00 close {close_19:,.2f}  RSI(2) {rsi:.2f} < {RSI_THRESHOLD}  -> "
-                f"BUY {lot} lots @ {res.price}, ATR {atr:,.1f}, 1-ATR risk ${risk_usd:,.2f}{note}"
-                f"{sl_msg}")
+        return self._report(s, sig, f"BUY {lot} lots @ {res.price:,.2f}{note}",
+                            f"ATR {atr:,.1f}, 1-ATR risk ${risk_usd:,.2f}{sl_msg}")
 
     def __repr__(self) -> str:
         lines = ["IndexDipStrategy:"]
