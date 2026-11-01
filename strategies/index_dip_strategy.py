@@ -69,15 +69,18 @@ import MetaTrader5 as mt5
 # reload 20260810, gold scalp 20261003, USTEC_E 20261009, USTEC_A 20261010,
 # GOLD_0000 20261011, GOLD_0100 20261012, USTEC reopen straddle 20261030.
 SETUPS: List[Dict[str, Any]] = [
+    # US30 ON (2026-11-01). SL 1.31 x ATR = deepest dip of a winning US30 trade.
     {"name": "DIP_US30",  "enabled": True,  "symbol": "US30m",  "magic": 20261028,
-     "risk_pct": 1.0, "comment": "dip_us30"},
+     "risk_pct": 1.0, "comment": "dip_us30", "sl_atr": 1.31},
+    # Only USTEC trades (Joseph, 2026-11-01). SL 3 x ATR: best for USTEC in the
+    # gap-aware replay (+$303, DD $52 vs 1.05 ATR +$157, DD $89).
     {"name": "DIP_USTEC", "enabled": True,  "symbol": "USTECm", "magic": 20261029,
-     "risk_pct": 1.0, "comment": "dip_ustec"},
+     "risk_pct": 1.0, "comment": "dip_ustec", "sl_atr": 3.0},
     # magic moved off 20261030 (also used by the USTEC reopen straddle). Switch only
     # while no JP225 dip position is open, or the old position won't be managed.
-    {"name": "DIP_JP225", "enabled": True,  "symbol": "JP225m", "magic": 20261033,
+    {"name": "DIP_JP225", "enabled": False,  "symbol": "JP225m", "magic": 20261033,
      "risk_pct": 1.0, "comment": "dip_jp225"},
-    {"name": "DIP_DE30",  "enabled": True,  "symbol": "DE30m",  "magic": 20261031,
+    {"name": "DIP_DE30",  "enabled": False,  "symbol": "DE30m",  "magic": 20261031,
      "risk_pct": 1.0, "comment": "dip_de30"},
     # Failed the 19:00 re-test (edge only at the midnight close). Off.
     {"name": "DIP_UK100", "enabled": False, "symbol": "UK100m", "magic": 20261032,
@@ -86,7 +89,8 @@ SETUPS: List[Dict[str, Any]] = [
 
 CHECK_HOUR = 19                 # UTC. 18:00-20:00 all tested fine; 19:00 is the middle
 CHECK_MINUTE = 0
-CHECK_WINDOW_MINUTES = 10       # entries only in 19:01-19:10 (covers a missed poll)
+CHECK_WINDOW_MINUTES = 30       # entries only in 19:01-19:30 broker time (data late -> still in time;
+                                # 18:00-20:00 entries all tested fine)
 ENTRY_DELAY_MINUTES = 1         # broker time; never decide at 19:00:00 — the 18:00 H1 bar may not be final
                                 # and history may still be syncing (29 Oct: US30 RSI read 85.58
                                 # at 19:00:00, 18.21 at 19:01 on the SAME close)
@@ -102,7 +106,10 @@ STALE_TICK = datetime.timedelta(minutes=10)
 ENTRY_DEVIATION = 200           # points
 EXIT_DEVIATION = 500            # points — exits must not be refused
 BREAKER_LOOKBACK_DAYS = 10      # deals fetched from before the 1st (cross-month positions)
-DISASTER_SL_ATR = 3.0           # stop at fill - 3 x ATR14; 0 = no stop at all
+DISASTER_SL_ATR = 3.0           # default stop = fill - 3 x ATR14 (a setup's "sl_atr" overrides it)
+BREAKER_ON = False              # monthly loss breaker OFF (2026-11-01: USTEC +$303 without vs +$168 with)
+COOLDOWN_DAYS = 3               # after a LOSING trade, skip signals for 3 calendar days after its entry
+                                # (USTEC: +$274, DD $29, streak 3 vs no rule +$303, DD $52, streak 4)
 PRICE_CHECK_PCT = 0.3           # 18:00-bar close must be within 0.3% of the 19:00 open
                                 # (and 0.9% of the live bid) or the read is treated as bad
 
@@ -305,6 +312,26 @@ class IndexDipStrategy:
                 return f"position {pid} entered {p['entry']:%d %b} lost {p['pnl']:+.2f}"
         return None
 
+    def _recent_loss(self, s: Dict[str, Any], now: datetime.datetime) -> Optional[str]:
+        """A closed losing position ENTERED within the last COOLDOWN_DAYS calendar
+        days blocks new entries. Read from deal history every call — nothing stored."""
+        deals = self._own_deals(s, now - datetime.timedelta(days=COOLDOWN_DAYS + 7), now)
+        by_pos: Dict[int, Dict[str, Any]] = {}
+        for d in deals:
+            p = by_pos.setdefault(d.position_id, {"entry": None, "closed": False, "pnl": 0.0})
+            p["pnl"] += d.profit + d.swap + d.commission + getattr(d, "fee", 0.0)
+            if d.entry == mt5.DEAL_ENTRY_IN:
+                t = _ts(d.time)
+                p["entry"] = t if p["entry"] is None else min(p["entry"], t)
+            elif d.entry == mt5.DEAL_ENTRY_OUT:
+                p["closed"] = True
+        for pid, p in by_pos.items():
+            if p["closed"] and p["entry"] is not None and p["pnl"] <= 0 \
+                    and (now.date() - p["entry"].date()).days <= COOLDOWN_DAYS:
+                until = p["entry"].date() + datetime.timedelta(days=COOLDOWN_DAYS)
+                return f"loss {p['pnl']:+.2f} on trade entered {p['entry']:%a %d %b}; trading again after {until:%a %d %b}"
+        return None
+
     # ------------------------------------------------------------ sizing
     def _lot(self, s: Dict[str, Any], atr: float):
         """balance * risk% / (ATR14 * $ per 1.0 move per lot), from the symbol's
@@ -369,12 +396,13 @@ class IndexDipStrategy:
         info = mt5.symbol_info(s["symbol"])
         if not atr or info is None:
             return "Disaster SL: ATR/symbol info unavailable — will retry"
-        sl = round(pos.price_open - DISASTER_SL_ATR * atr, info.digits)
+        k = s.get("sl_atr", DISASTER_SL_ATR)
+        sl = round(pos.price_open - k * atr, info.digits)
         ok = self._ok(self._send({
             "action": mt5.TRADE_ACTION_SLTP, "symbol": s["symbol"], "position": pos.ticket,
             "sl": sl, "tp": 0.0,
         }, f"{s['name']} disaster SL ticket {pos.ticket}"))
-        return (f"Disaster SL set at {sl:,.{info.digits}f} ({DISASTER_SL_ATR} x ATR {atr:,.1f})"
+        return (f"Stop loss set at {sl:,.{info.digits}f} ({k} x ATR {atr:,.1f})"
                 if ok else "Disaster SL modify FAILED — will retry next poll")
 
     def manage(self, s: Dict[str, Any], now: Optional[datetime.datetime] = None) -> List[str]:
@@ -477,9 +505,12 @@ class IndexDipStrategy:
             return self._report(s, sig, "NO TRADE — position still open (exit pending)")
         if any(d.entry == mt5.DEAL_ENTRY_IN for d in self._own_deals(s, check_at, bnow)):
             return self._report(s, sig, "NO TRADE — already traded at this check")
-        blocked = self._lost_this_month(s, bnow)
+        blocked = self._lost_this_month(s, bnow) if BREAKER_ON else None
         if blocked:
             return self._report(s, sig, f"NO TRADE — BREAKER: {blocked}; off until the 1st")
+        cool = self._recent_loss(s, bnow) if COOLDOWN_DAYS > 0 else None
+        if cool:
+            return self._report(s, sig, f"NO TRADE — COOLDOWN: {cool}")
         tick, why = self._fresh_tick(s, bnow)
         if tick is None:
             return self._report(s, sig, f"WAIT — {why}")
@@ -531,11 +562,14 @@ class IndexDipStrategy:
 
     def __repr__(self) -> str:
         lines = ["IndexDipStrategy:"]
-        for s in SETUPS:
+        for s in enabled_setups():
             lines.append(
                 f"  [{'ON ' if s['enabled'] else 'OFF'}] {s['name']}: {s['symbol']} "
                 f"check {CHECK_HOUR:02d}:{CHECK_MINUTE:02d} UTC Mon-Fri, BUY if RSI({RSI_PERIOD}) "
-                f"< {RSI_THRESHOLD}, hold 1 day, no TP, disaster SL {DISASTER_SL_ATR} x ATR, "
+                f"< {RSI_THRESHOLD}, hold 1 day, no TP, SL {s.get('sl_atr', DISASTER_SL_ATR)} x ATR, "
                 f"risk {s['risk_pct']}% / ATR{ATR_PERIOD}, "
-                f"1 loss/month breaker, magic {s['magic']}")
+                f"{'1 loss/month breaker' if BREAKER_ON else 'no breaker'}, {COOLDOWN_DAYS}-day pause after a loss, magic {s['magic']}")
+        off = [s["symbol"] for s in SETUPS if not s["enabled"]]
+        if off:
+            lines.append(f"  (off: {', '.join(off)})")
         return "\n".join(lines)

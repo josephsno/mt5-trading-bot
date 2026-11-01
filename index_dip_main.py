@@ -31,8 +31,9 @@ def reload_decouple():
 # 60-second clock-aligned polling. The strategy only acts around 19:00 UTC:
 #   18:50-18:59  history warm-up (no trading, nothing printed)
 #   19:00        exits (retried every poll until the market is open)
-#   19:01-19:10  entry decisions; ONE summary block per day, after that only
-#                trades, exits, errors and "will retry" lines are printed
+#   19:01-19:30  entry decisions (BROKER time, from the finished 18:00 candle);
+#                ONE full report per day (prices, RSI, verdict), after that only
+#                BUY / WAIT / exits / errors are printed
 # Outside that: a heartbeat line every 15 minutes.
 POLL_SECONDS = 60
 HEARTBEAT_MINUTES = 15
@@ -50,18 +51,18 @@ def sleep_until_next_poll(now: datetime, interval: int = POLL_SECONDS):
 
 reload_decouple()
 
-LIVE = False  # new strategy — demo first. See index_dip_strategy.py.
+LIVE = True  # new strategy — demo first. See index_dip_strategy.py.
 
-# Standalone process. US30 20261028, USTEC 20261029, JP225 20261030,
-# DE30 20261031 (UK100 20261032, disabled). Only ever touches its own positions.
+# Standalone process. USTEC 20261029 + US30 20261028 ON; JP225 20261033, DE30 20261031,
+# UK100 20261032 OFF. Only ever touches its own positions.
 
 QUIET = {"Outside check window"}
-# repeated every minute of the window — shown once in the daily summary only
-ROUTINE = ("Position still open", "Already traded at this check", "BREAKER:")
+# repeated every minute of the window — shown once in the daily report only
+ROUTINE = ("=> NO TRADE",)
 
 
 def is_routine(msg: str) -> bool:
-    return msg.startswith(ROUTINE) or "-> no signal" in msg
+    return any(r in msg for r in ROUTINE)
 
 
 def main():
@@ -117,13 +118,13 @@ def main():
                 status = strategy.check_and_place(s, now)
                 if status not in QUIET:
                     msgs.append(status)
-                if any(m.endswith("will retry") for m in msgs):
+                if any("will retry" in m for m in msgs):
                     retrying = True
                 if not show_summary:
                     msgs = [m for m in msgs if not is_routine(m)]
                 if msgs:
-                    lines.append(f"\n{s['name']} ({s['symbol']})")
-                    lines.extend(f"   {m}" for m in msgs)
+                    lines.append("")
+                    lines.extend(m if m.startswith("[") else f"[{s['name']}] {m}" for m in msgs)
             except Exception as e:  # never let one bad cycle kill the bot
                 lines.append(f"\n{s['name']} ({s['symbol']})")
                 lines.append(f"   Cycle error: {e!r}")
