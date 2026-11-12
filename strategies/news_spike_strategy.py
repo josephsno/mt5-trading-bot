@@ -280,6 +280,14 @@ class NewsSpikeStrategy:
         want = _round(pos.price_open - SL if is_buy else pos.price_open + SL)
         if abs(want - old) < (10 ** -DECIMALS) / 2:
             return None
+        # Price already past the corrected stop (big entry slip + fast reversal):
+        # MT5 would reject the modify every poll — the trade is stopped by the
+        # backtest's rule, so close it now at market instead.
+        tick = self._tick()
+        if tick is not None and ((is_buy and tick.bid <= want) or (not is_buy and tick.ask >= want)):
+            ok = self._close(pos, COMMENT_CLOSE)
+            return (f"ticket {pos.ticket}: price already past the corrected stop {want} — "
+                    f"closed at market: {'ok' if ok else '!! FAILED — will retry'}")
         ok = self._ok(self._send({
             "action": mt5.TRADE_ACTION_SLTP, "symbol": SYMBOL, "position": pos.ticket,
             "sl": want, "tp": pos.tp,
@@ -300,8 +308,9 @@ class NewsSpikeStrategy:
                 fix = self._correct_sl(pos)
                 if fix:
                     msgs.append(fix)
-            if positions:
-                msgs.append(f"{len(positions)} position(s) open — close at "
+            still = self._positions()
+            if still:
+                msgs.append(f"{len(still)} position(s) open — close at "
                             f"{span[0] + datetime.timedelta(seconds=HOLD_SECONDS):%H:%M:%S} UTC")
         else:
             for o in orders:

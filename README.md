@@ -48,7 +48,7 @@ its path on line 1. Stop an old copy of a bot before starting the new one.
 - Dates in `FOMC_DATES` (9 Dec 2026 → 26 Jan 2028); the bot warns when they run out.
 
 ### 4. News straddle — `strategies/news_spike_strategy.py`
-- 2 s before NFP / CPI (08:30 NY) and FOMC (14:00 NY): buy-stop / sell-stop at mid ± $3, SL $7 (re-anchored to the real fill), no OCO.
+- 2 s before NFP / CPI (08:30 NY) and FOMC (14:00 NY): buy-stop / sell-stop at mid ± $3, SL $7 (re-anchored to the real fill; closed at market if price is already past it), no OCO.
 - Everything closed / cancelled at release + 60 s; anything of its own found outside that span is closed.
 - Risk **1%** (was 14% — why it was stopped in October).
 - **Touches only its own magic.** The old version closed every gold position of any bot before each release and the whole account after it; that is now behind `FLATTEN_OTHER_BOTS = False`.
@@ -58,6 +58,7 @@ its path on line 1. Stop an old copy of a bot before starting the new one.
 ### 5. Gold hat long — `strategies/gold_hat_strategy.py`
 - Only while New York is on standard time (first Sunday of Nov → second Sunday of Mar), Mon–Thu.
 - BUY 11:00 NY (16:00 UTC), SELL 02:00 NY next day (07:00 UTC). Stop 2 × ATR14 (average daily high–low).
+- Skips nights touching a holiday closure (24/25 Dec, 31 Dec/1 Jan). ATR from weekday D1 bars only.
 - Size 1% at the stop — with gold's ATR near $100 that is the minimum lot below roughly a $20,000 balance.
 
 ### 6. USDJPY Asian-range break — `strategies/usdjpy_asian_range_strategy.py`

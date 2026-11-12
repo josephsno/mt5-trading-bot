@@ -10,13 +10,15 @@ US standard time (Nov-Mar).
 Rules (exactly as backtested, hat/hat2.py + stop test 2026-11-03):
   WHEN   : only on New York dates that are on standard (winter) time —
            first Sunday of November -> second Sunday of March. Mon-Thu
-           entries only (a Friday entry would hold over the weekend).
+           entries only (a Friday entry would hold over the weekend). Nights
+           touching a holiday closure (24/25 Dec, 31 Dec/1 Jan) are skipped.
   ENTRY  : market BUY at 11:00 New York (16:00 UTC / 17:00 Lagos), entry
            window 11:00-11:30 NY. One trade per night.
   EXIT   : close at 02:00 New York the next day (07:00 UTC / 08:00 Lagos).
            A missed exit is closed at the first poll after it.
   STOP   : 2 x ATR14 below the REAL fill. ATR14 = average daily high-low
-           range of the last 14 finished D1 bars (known before entry). A
+           range of the last 14 finished WEEKDAY D1 bars (known before entry;
+           Sunday stub bars left out). A
            disaster stop only: never hit in 5 winters.
   SIZE   : lot = 1% of balance / (2 x ATR14 x $ per 1.0 move per lot),
            rounded DOWN to the lot step; volume_min if smaller (flagged).
@@ -123,8 +125,27 @@ def exit_time(ny_day: datetime.date) -> datetime.datetime:
     return ny_to_utc(ny_day + datetime.timedelta(days=1), EXIT_HOUR_NY)
 
 
+def market_closed(d: datetime.date) -> bool:
+    """Gold holiday closures that fall on a weekday: 25 Dec, 1 Jan, and the
+    observed day when they fall on a weekend (24 Dec Fri, 26 Dec Mon, 2 Jan Mon).
+    Matches every missing entry/exit candle in the 2021-2026 H1 data."""
+    if (d.month, d.day) in ((12, 25), (1, 1)):
+        return True
+    if (d.month, d.day) == (12, 24) and d.weekday() == 4:
+        return True
+    if (d.month, d.day) in ((12, 26), (1, 2)) and d.weekday() == 0:
+        return True
+    return False
+
+
 def trading_night(ny_day: datetime.date) -> bool:
-    return ny_day.weekday() in ENTRY_WEEKDAYS and is_winter(ny_day)
+    """Mon-Thu, NY winter time, and neither the entry day nor the exit day
+    (next NY day) is a holiday closure — the backtest skipped those nights
+    (no 11:00 or 02:00 candle); the bot would otherwise be stuck in a trade
+    over the holiday."""
+    nxt = ny_day + datetime.timedelta(days=1)
+    return (ny_day.weekday() in ENTRY_WEEKDAYS and is_winter(ny_day)
+            and not market_closed(ny_day) and not market_closed(nxt))
 
 
 def atr_hilo(d1_bars, period: int = ATR_PERIOD) -> Optional[float]:
@@ -216,12 +237,18 @@ class GoldHatStrategy:
         return sorted(own, key=lambda p: (p.time_msc, p.ticket))
 
     def _atr(self, now: datetime.datetime) -> Optional[float]:
-        d1 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_D1, 1, ATR_PERIOD)   # finished days
-        if d1 is None or len(d1) < ATR_PERIOD:
+        """Finished weekday D1 bars only. Exness opens gold on Sunday 23:00 UTC,
+        so MT5 has a 1-hour Sunday D1 bar most weeks; counting it would shrink
+        the ATR (the backtest used Mon-Fri days only)."""
+        d1 = mt5.copy_rates_from_pos(SYMBOL, mt5.TIMEFRAME_D1, 1, ATR_PERIOD + 10)
+        if d1 is None or len(d1) == 0:
             return None
-        if now - _ts(int(d1[-1]["time"])) > datetime.timedelta(days=5):
+        week = [b for b in d1 if _ts(int(b["time"])).weekday() < 5]
+        if len(week) < ATR_PERIOD:
+            return None
+        if now - _ts(int(week[-1]["time"])) > datetime.timedelta(days=5):
             return None                                   # stale D1 history
-        return atr_hilo(d1)
+        return atr_hilo(week)
 
     def _lot(self, atr: float) -> Tuple[float, float, bool]:
         """(lot, $ lost if the stop is hit, forced_to_min)."""
@@ -288,7 +315,12 @@ class GoldHatStrategy:
             return "Outside entry window"
         head = f"[HAT] {day:%a %d %b %Y} 11:00 NY ({start:%H:%M} UTC)"
         if not trading_night(day):
-            why = "summer time (winter only)" if not is_winter(day) else "Friday — no weekend hold"
+            if not is_winter(day):
+                why = "summer time (winter only)"
+            elif day.weekday() not in ENTRY_WEEKDAYS:
+                why = "Friday — no weekend hold"
+            else:
+                why = "holiday — market closed today or at 02:00 tomorrow"
             return f"{head}\n   => NO TRADE — {why}"
         if self._positions():
             return f"{head}\n   => NO TRADE — position still open"
