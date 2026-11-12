@@ -1,3 +1,4 @@
+# main_gold_straddle.py
 import time
 from decouple import config, AutoConfig
 from mt5.meter_trader_config import MetaTraderConfig
@@ -25,8 +26,9 @@ def reload_decouple():
 # Polling
 # ---------------------------------------------------------------------------
 # 5-minute clock-aligned polling (:00, :05, :10 ...) — exactly what the
-# backtest assumed. The 00:00 and 01:00 polls are the entry polls; every
-# other poll manages BE / trail / OCO / deadline. Faster polling was tested
+# backtest assumed. The 00:00 and 01:00 polls are the entry polls (the daily
+# movement filter + week pause B are checked there, inside check_and_place);
+# every other poll manages BE / trail / OCO / deadline. Faster polling was tested
 # (1s, 10s, 30s, 60s) and was not reliably better — keep 5 min.
 POLL_SECONDS = 300
 

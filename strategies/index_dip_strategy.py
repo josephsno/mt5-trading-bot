@@ -1,63 +1,59 @@
+# strategies/index_dip_strategy.py
 """
 Index Dip Strategy — RSI(2) dip buy at 19:00 UTC (stateless)
 ============================================================
 One class, IndexDipStrategy, runs every index in SETUPS. Each index has its
-own MAGIC, so they never touch each other's positions, and each has its own
-monthly breaker.
+own MAGIC, so they never touch each other's positions.
 
 Once a day, Monday-Friday, at 19:00 UTC (20:00 Lagos):
   1. EXIT  : any position this setup opened at an earlier check is closed at
              market (held ~1 day; a Friday trade closes Monday 19:00).
-  2. BREAKER: if this index had a LOSING trade entered this calendar month,
-             it takes no more trades until the 1st (per index, independent).
+  2. PAUSE : after a LOSING trade (net P&L <= 0), no new entry for 3 calendar
+             days after that trade's entry (COOLDOWN_DAYS). The monthly loss
+             breaker is OFF (BREAKER_ON = False, 2026-11-01).
   3. SIGNAL: build "daily" closes from the H1 bar that ends at 19:00 UTC on
              each weekday; RSI(2) of those closes < 5  ->  BUY. Decided from
              19:01, never at 19:00:00, and only on history that passes checks
              (warmed up 18:50-18:59, two identical reads, the 19:00 bar has
-             started, no big gaps, fresh D1) — else "will retry" next poll.
-  4. SIZE  : lot = balance * risk% / (ATR14(D1) * $ per 1.0 move per lot),
-             rounded DOWN to volume_step; if below the symbol's volume_min
-             (read live from MT5), the minimum lot is used and flagged.
-  5. ORDER : market BUY, no TP. Long only. A DISASTER stop is set at
-             fill price - 3 x ATR14 (insurance only — see below).
-  6. HEAL  : any own position without an SL gets the disaster stop added
-             on the next poll (covers a failed modify / restart).
+             started, no big gaps, fresh D1, price cross-check) — else
+             "will retry" next poll.
+  4. SIZE  : lot = balance * 1% / (ATR14(D1) * $ per 1.0 move per lot) — 1% per
+             1-ATR move (Joseph, 2026-11-02), rounded DOWN to volume_step; if
+             below volume_min (read live), the minimum lot is used and flagged.
+  5. ORDER : market BUY, no TP. Long only. Stop at fill price - k x ATR14:
+             US30 1.31 x ATR, USTEC 3 x ATR (a full stop-out costs ~1.31% / ~3%).
+  6. HEAL  : any own position without an SL gets its stop added on the next
+             poll (covers a failed modify / restart).
 
-DISASTER STOP (2026-10-28, H1 Jul 2021 - Oct 2026, 4 indices, 168 trades):
-  SL        stops hit   total R   worst R
-  none          0        +38.1     -2.7
-  1.0 ATR      32        +27.8     -2.0     <- tight stops cut dips that recover
-  2.0 ATR       6        +32.9     -2.0
-  3.0 ATR       1        +36.4     -3.0     <- chosen: cheap flash-crash insurance
-  Gaps (overnight / weekend) fill at the open, below the stop — it caps an
-  intraday collapse, not a gap.
+Trade history (pause / breaker) is read per POSITION: positions are found by
+this setup's magic, then every deal of that position counts, whatever magic
+the exit deal carries (an SL exit is a server deal). Read twice, must match.
+If a position is closed but its exit is not in history yet, the entry waits.
 
-BACKTEST (2026-10-28, Exness H1, Jul 2021 - Oct 2026, entry/exit 19:00 UTC,
-one-loss-per-month breaker, % of position per trade, spread + swap included)
-  Index    trades  win%   avg/trade  total   max DD   years +
-  US30m      45     60     +0.37%    +16.5%   -3.3%    5/6
-  USTECm     46     63     +0.43%    +19.6%   -6.6%    5/6
-  JP225m     41     59     +0.28%    +11.5%   -5.8%    6/6
-  DE30m      36     64     +0.30%    +10.9%   -3.4%    5/6
-  Cross-check (D1 closes, 10 indices, 2018-2026, no breaker): positive on
-  10/10, pooled t 2.6. Selling the same dips lost on 10/10.
-  UK100m: no edge at any real trading hour (only at the midnight close) ->
-  kept here DISABLED.
+BACKTEST (Exness, hourly replay Jul 2021 - Oct 2026, 0.05 lot, with the 3-day pause)
+  USTECm  +$274, max DD $29     US30m  +$389, max DD $74
+  Every year positive 2021-2026. Daily check 2018-2026: no seriously losing
+  year with the pause (2022 about -$15). Same edge on 10/10 indices (t 2.6).
+  About 20 trades a year for the two together. Worst trades: USTEC -$34,
+  US30 -$72 (weekend gap, 4 Apr 2025). Crash days hit both together (worst
+  combined day -$121 at 0.05 lot).
 
 Why it works: sharp index drops are partly forced selling (margin calls,
 vol-targeting funds, dealer hedging) that over-shoots and is bought back
-within a day. The breaker steps aside when a dip turns into a slide.
+within a day.
 
-KNOWN LIMITS: only a wide disaster stop — a bad day can cost up to ~3x the
-1% "risk" (risk here = one average day, ATR14, against you), more on a gap. Profit leans on a few big
-rebound days. Below ~$3,000 balance most trades sit at volume_min, so the
-real risk per trade is above 1%. *** DEMO FIRST ***
+KNOWN LIMITS: slow bear markets (2022). Gaps (overnight / weekend) fill at the
+open, below the stop. Below ~$3,000 balance most trades sit at volume_min, so
+the real risk per trade is above 1%.
+BUG HISTORY: 29 Oct 2026 false USTEC entry from a half-loaded H1 read — fixed
+(19:01 decision, priming, two identical reads, price cross-check).
 """
 
 from __future__ import annotations
 
 import datetime
 import math
+import time
 from typing import Any, Dict, List, Optional
 
 import MetaTrader5 as mt5
@@ -110,6 +106,8 @@ DISASTER_SL_ATR = 3.0           # default stop = fill - 3 x ATR14 (a setup's "sl
 BREAKER_ON = False              # monthly loss breaker OFF (2026-11-01: USTEC +$303 without vs +$168 with)
 COOLDOWN_DAYS = 3               # after a LOSING trade, skip signals for 3 calendar days after its entry
                                 # (USTEC: +$274, DD $29, streak 3 vs no rule +$303, DD $52, streak 4)
+HISTORY_READ_TRIES = 3          # deal history must read the same twice in a row
+HISTORY_READ_PAUSE = 1.0        # seconds between reads
 PRICE_CHECK_PCT = 0.3           # 18:00-bar close must be within 0.3% of the 19:00 open
                                 # (and 0.9% of the live bid) or the read is treated as bad
 
@@ -291,15 +289,36 @@ class IndexDipStrategy:
             return None, f"Market likely closed — last tick {age} old"
         return tick, ""
 
-    # ------------------------------------------------------------ breaker
-    def _lost_this_month(self, s: Dict[str, Any], now: datetime.datetime) -> Optional[str]:
-        """A closed position ENTERED this calendar month with net P&L <= 0
-        (profit + swap + commission + fee over all its deals) blocks the
-        index until the 1st. Read from deal history every call — nothing stored."""
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        deals = self._own_deals(s, month_start - datetime.timedelta(days=BREAKER_LOOKBACK_DAYS), now)
+    # ------------------------------------------------------------ trade history
+    def _position_history(self, s: Dict[str, Any], start: datetime.datetime,
+                          now: datetime.datetime) -> Optional[Dict[int, Dict[str, Any]]]:
+        """{position_id: {entry, closed, pnl}} for this setup's positions with an
+        entry deal in the window. Positions are picked by the magic on their
+        deals; then EVERY deal of that position is summed (profit + swap +
+        commission + fee) — an SL exit is a server deal and may not carry the
+        magic. Two identical reads required (half-synced history, 29 Oct).
+        None = history not trusted (caller waits and retries)."""
+        end = now + datetime.timedelta(minutes=1)
+        prev = None
+        deals = None
+        for i in range(HISTORY_READ_TRIES + 1):
+            cur = mt5.history_deals_get(start, end)   # None = error, () = no deals
+            if cur is not None and prev is not None and \
+                    (len(cur), max((d.ticket for d in cur), default=0)) == \
+                    (len(prev), max((d.ticket for d in prev), default=0)):
+                deals = cur
+                break
+            prev = cur
+            if i < HISTORY_READ_TRIES:
+                time.sleep(HISTORY_READ_PAUSE)
+        if deals is None:
+            return None
+        ours = {d.position_id for d in deals
+                if d.magic == s["magic"] and d.symbol == s["symbol"] and d.position_id}
         by_pos: Dict[int, Dict[str, Any]] = {}
         for d in deals:
+            if d.position_id not in ours:
+                continue
             p = by_pos.setdefault(d.position_id, {"entry": None, "closed": False, "pnl": 0.0})
             p["pnl"] += d.profit + d.swap + d.commission + getattr(d, "fee", 0.0)
             if d.entry == mt5.DEAL_ENTRY_IN:
@@ -307,25 +326,33 @@ class IndexDipStrategy:
                 p["entry"] = t if p["entry"] is None else min(p["entry"], t)
             elif d.entry == mt5.DEAL_ENTRY_OUT:
                 p["closed"] = True
-        for pid, p in by_pos.items():
+        return by_pos
+
+    def _exit_not_in_history(self, s: Dict[str, Any], hist: Dict[int, Dict[str, Any]]) -> Optional[int]:
+        """A position that is no longer open but has no exit deal in history yet
+        (just closed by manage(); history lagging). Its P&L is unknown, so the
+        pause cannot be judged — the entry must wait."""
+        open_now = {p.ticket for p in self._positions(s)}
+        for pid, p in hist.items():
+            if p["entry"] is not None and not p["closed"] and pid not in open_now:
+                return pid
+        return None
+
+    def _lost_this_month(self, s: Dict[str, Any], hist: Dict[int, Dict[str, Any]],
+                         now: datetime.datetime) -> Optional[str]:
+        """A closed position ENTERED this calendar month with net P&L <= 0
+        blocks the index until the 1st (only if BREAKER_ON)."""
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        for pid, p in hist.items():
             if p["closed"] and p["entry"] is not None and p["entry"] >= month_start and p["pnl"] <= 0:
                 return f"position {pid} entered {p['entry']:%d %b} lost {p['pnl']:+.2f}"
         return None
 
-    def _recent_loss(self, s: Dict[str, Any], now: datetime.datetime) -> Optional[str]:
+    def _recent_loss(self, s: Dict[str, Any], hist: Dict[int, Dict[str, Any]],
+                     now: datetime.datetime) -> Optional[str]:
         """A closed losing position ENTERED within the last COOLDOWN_DAYS calendar
-        days blocks new entries. Read from deal history every call — nothing stored."""
-        deals = self._own_deals(s, now - datetime.timedelta(days=COOLDOWN_DAYS + 7), now)
-        by_pos: Dict[int, Dict[str, Any]] = {}
-        for d in deals:
-            p = by_pos.setdefault(d.position_id, {"entry": None, "closed": False, "pnl": 0.0})
-            p["pnl"] += d.profit + d.swap + d.commission + getattr(d, "fee", 0.0)
-            if d.entry == mt5.DEAL_ENTRY_IN:
-                t = _ts(d.time)
-                p["entry"] = t if p["entry"] is None else min(p["entry"], t)
-            elif d.entry == mt5.DEAL_ENTRY_OUT:
-                p["closed"] = True
-        for pid, p in by_pos.items():
+        days blocks new entries."""
+        for pid, p in hist.items():
             if p["closed"] and p["entry"] is not None and p["pnl"] <= 0 \
                     and (now.date() - p["entry"].date()).days <= COOLDOWN_DAYS:
                 until = p["entry"].date() + datetime.timedelta(days=COOLDOWN_DAYS)
@@ -505,10 +532,19 @@ class IndexDipStrategy:
             return self._report(s, sig, "NO TRADE — position still open (exit pending)")
         if any(d.entry == mt5.DEAL_ENTRY_IN for d in self._own_deals(s, check_at, bnow)):
             return self._report(s, sig, "NO TRADE — already traded at this check")
-        blocked = self._lost_this_month(s, bnow) if BREAKER_ON else None
+        month_start = bnow.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        hist_start = min(month_start - datetime.timedelta(days=BREAKER_LOOKBACK_DAYS),
+                         bnow - datetime.timedelta(days=COOLDOWN_DAYS + 7))
+        hist = self._position_history(s, hist_start, bnow)
+        if hist is None:
+            return self._report(s, sig, "WAIT — deal history not stable/available — will retry")
+        pending = self._exit_not_in_history(s, hist)
+        if pending:
+            return self._report(s, sig, f"WAIT — position {pending} closed but its exit is not in history yet — will retry")
+        blocked = self._lost_this_month(s, hist, bnow) if BREAKER_ON else None
         if blocked:
             return self._report(s, sig, f"NO TRADE — BREAKER: {blocked}; off until the 1st")
-        cool = self._recent_loss(s, bnow) if COOLDOWN_DAYS > 0 else None
+        cool = self._recent_loss(s, hist, bnow) if COOLDOWN_DAYS > 0 else None
         if cool:
             return self._report(s, sig, f"NO TRADE — COOLDOWN: {cool}")
         tick, why = self._fresh_tick(s, bnow)

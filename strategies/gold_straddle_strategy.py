@@ -1,3 +1,4 @@
+# strategies/gold_straddle_strategy.py
 """
 Gold Straddle Strategy — 00:00 + 01:00 UTC (stateless)
 ======================================================
@@ -6,15 +7,13 @@ its own trigger time and its own MAGIC, so the two never touch each other's
 orders or positions (a 00:00 trade still open at 01:00 does NOT block the
 01:00 straddle).
 
-Logic is a 1:1 copy of the XAUUSDm branch of straddle_strategy.py — the exact
-code that was replayed on tick data — so live behaviour matches the backtest:
 Entry  : At the trigger time, mid = (bid+ask)/2. Buy-stop at mid + $10,
          sell-stop at mid - $10. Whichever fills first is the trade; the
          other is cancelled at the next poll (OCO).
 SL     : $20 from the STOP LEVEL (set on the pending order, not re-anchored).
 BE     : When the CURRENT price at a poll is >= +$20 in profit, SL -> entry.
-         (Tested: triggering on the best price since entry instead was WORSE,
-         +$117 vs +$176 Jun/Jul/Oct — do not "fix" this.)
+         (Tested: triggering on the best price since entry instead was WORSE
+         — do not "fix" this.)
 Trail  : After BE, SL trails $15 behind the best M15 high/low since entry.
 Cancel : Unfilled stops expire at the setup's cancel hour (8h after trigger),
          broker-side (ORDER_TIME_SPECIFIED) AND bot-side.
@@ -22,40 +21,45 @@ Exit   : No TP. Hard close 1h before this setup's next trigger, capped at
          Friday 20:00 UTC so nothing rides the weekend.
 Dual   : If both stops fill before the OCO cancel, the newer position is
          closed at market and the first fill is kept.
-Polling: every 5 minutes, clock-aligned (main_gold_straddle.py) — the
-         backtest assumed exactly this. Tested 1s/10s/30s/60s/15min: no speed
-         is reliably better; 5 min was near the top.
+Polling: every 5 minutes, clock-aligned (main_gold_straddle.py).
 
-BACKTEST (2026-10-09, Exness XAUUSDm ticks, Jan-Aug + Oct 1-9 2026, per 0.01 lot)
-  Month     00:00      01:00      Both
-  Jan     +167.35    +170.07    +337.42
-  Feb     +348.41     +96.10    +444.51
-  Mar      +19.93     -32.57     -12.64
-  Apr     -100.50    +180.29     +79.79
-  May     +171.12    +342.12    +513.24
-  Jun      +57.27    +133.00    +190.27
-  Jul     +100.62      -3.19     +97.43
-  Aug      +14.84    +121.77    +136.61
-  Oct1-9   +62.90     +46.16    +109.06
-  Total   +841.94  +1,053.74  +1,895.68
-  01:00: 183 trades, 55% wins, max DD $118, worst streak 5.
-  00:00: 173 trades, 51% wins, max DD $189, worst streak 7.
-  Both : max DD $185; daily correlation 0.10 (one lost while the other won on
-         86 of 173 shared days; both lost on 38).
-  Why it works: 01:00 UTC = Shanghai Gold Exchange day-session open (09:00
-  Beijing); 00:00 UTC = Tokyo open. Same code at every other hour 02:00-15:00
-  mostly lost (-$479..+$239). Buys and sells both profitable.
+TWO DAILY CHECKS before placing (decided 2026-11-06, active from FILTERS_FROM)
+  1) MOVEMENT FILTER — skip the day (both setups) if the median 00:00-08:00
+     UTC range of the last 20 finished weekdays is below $14. Range = highest
+     H1 high - lowest H1 low of the 00:00..07:00 UTC H1 bars (bid bars).
+     Fewer than 20 days of bars -> skip (same as the backtest).
+  2) WEEK PAUSE (version B) — weeks of the month: days 1-7 / 8-14 / 15-21 /
+     22-28 / 29-31, by the trade's open date (UTC). Both setups are judged
+     together (net P&L of both magics, scaled to 0.01 lot like the backtest).
+     If a week lost in 2 traded months in a row, it is skipped for the next
+     calendar month, then resumes; the count restarts after a pause. Rebuilt
+     every time from MT5 deal history (last 12 months) — nothing stored.
+  Both checks read MT5 history twice and need identical results (up to 3
+  retries, 1s apart) — a half-synced read (dip bot, 29 Oct 2026) or a failed
+  read skips the day instead of trading on bad data.
 
-KNOWN LIMITS: 2026 only (a volatile gold year). 01:00's settings were chosen
-in July and held up since, but Jul/Aug/Oct averaged ~+$3/trade vs ~+$7
-earlier. 00:00 was found on 2026-10-09 and has no out-of-sample test yet.
-Sep 2026 untested. *** 00:00 DEMO FIRST ***
+BACKTEST (Exness XAUUSDm ticks, bot-faithful replay, per 0.01 lot)
+  No checks, 2018 + 2022-Oct 2026 : +$2,010, max DD $598, PF 1.21, win 50%
+  Filter + week pause B (same)    : +$2,307, max DD $472, PF 1.39, win 54%
+  By year (filter + pause B): no year worse than -$13 (2018/2022/2023 were
+  -$96/-$225/-$103 without). Unseen 2021: -$13 vs +$77 without (protective
+  in quiet years, does not add profit there).
+  Balance to survive any start month in the data: about $300 per 0.01 lot.
+  Why it works: 00:00 UTC = Tokyo open, 01:00 UTC = Shanghai Gold Exchange
+  day-session open. It earns when gold moves early (~$14+ range) and bleeds
+  slowly in quiet markets (~$10 or less) — the filter switches it off then.
+
+KNOWN LIMITS: the $14 threshold was partly chosen in-sample; recheck on
+Nov-Dec 2026 data. Busy-market whipsaw drawdowns (May-Jul 2025, $472) are not
+removed by either check.
 """
 
 from __future__ import annotations
 
 import datetime
-from typing import Any, Dict, List, Optional
+import statistics
+import time
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import MetaTrader5 as mt5
 
@@ -96,6 +100,19 @@ STALE_TICK = datetime.timedelta(minutes=10)
 EXIT_DEVIATION = 200           # points, market closes
 DECIMALS = 2                   # same rounding straddle_strategy.py uses for XAUUSDm
 
+# --- daily checks (movement filter + week pause B) --------------------------
+FILTERS_FROM = datetime.date(2027, 1, 1)   # checks switch on from this UTC date
+FILTER_SYMBOL = "XAUUSDm"
+FILTER_MIN_RANGE = 14.0        # $ — skip the day if the median range is below
+FILTER_DAYS = 20               # finished weekdays in the median
+FILTER_END_HOUR = 8            # window 00:00..07:59 UTC
+FILTER_LOOKBACK_DAYS = 45      # calendar days of H1 bars to pull (>= 20 weekdays)
+PAUSE_LOSING_MONTHS = 2        # losing traded months in a row -> pause
+PAUSE_LOOKBACK_MONTHS = 12     # months of deal history replayed
+STABLE_READ_TRIES = 3          # history reads must match twice in a row (29 Oct dip-bot lesson)
+STABLE_READ_PAUSE = 1.0        # seconds between reads
+FILTER_MAX_GAP_DAYS = 4        # newest finished day older than this -> history not synced, skip
+
 
 def enabled_setups() -> List[Dict[str, Any]]:
     return [s for s in SETUPS if s["enabled"]]
@@ -107,6 +124,90 @@ def _round(price: float) -> float:
 
 def _ts(seconds: int) -> datetime.datetime:
     return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
+
+
+def week_of_month(day: int) -> int:
+    """1 = days 1-7, 2 = 8-14, 3 = 15-21, 4 = 22-28, 5 = 29-31."""
+    return min((day - 1) // 7 + 1, 5)
+
+
+def _month_index(d: datetime.date) -> int:
+    return d.year * 12 + d.month - 1
+
+
+# ---------------------------------------------------------------------------
+# Daily-check logic as plain functions (no MT5 inside -> testable offline)
+# ---------------------------------------------------------------------------
+def median_early_range(bars: Sequence[Tuple[int, float, float]],
+                       today: datetime.date) -> Tuple[Optional[float], int]:
+    """bars = (open_time_unix_utc, high, low) H1 bars. Uses only finished
+    weekdays BEFORE `today`, hours 00..FILTER_END_HOUR-1. Returns
+    (median of the last FILTER_DAYS daily ranges, days available)."""
+    hi: Dict[datetime.date, float] = {}
+    lo: Dict[datetime.date, float] = {}
+    for t, h, l in bars:
+        ts = _ts(int(t))
+        d = ts.date()
+        if d >= today or ts.hour >= FILTER_END_HOUR or d.weekday() >= 5:
+            continue
+        hi[d] = max(hi.get(d, h), h)
+        lo[d] = min(lo.get(d, l), l)
+    days = sorted(hi)
+    if len(days) < FILTER_DAYS:
+        return None, len(days)
+    last = days[-FILTER_DAYS:]
+    return statistics.median(hi[d] - lo[d] for d in last), len(days)
+
+
+def paused_weeks(trades: Sequence[Tuple[datetime.date, float]],
+                 today: datetime.date) -> Dict[int, str]:
+    """trades = (open date UTC, net P&L) for BOTH setups, already closed.
+    Replays the finished months before today's month in order. Returns
+    {week: reason} for the weeks paused in today's month."""
+    cur = _month_index(today)
+    first = cur - PAUSE_LOOKBACK_MONTHS
+    pnl: Dict[Tuple[int, int], float] = {}
+    for d, v in trades:
+        m = _month_index(d)
+        if first <= m < cur:
+            key = (m, week_of_month(d.day))
+            pnl[key] = pnl.get(key, 0.0) + v
+    out: Dict[int, str] = {}
+    for wk in range(1, 6):
+        streak: List[int] = []
+        pause_month: Optional[int] = None
+        for m in range(first, cur):
+            if m == pause_month:
+                continue                      # the bot sat this week out
+            v = pnl.get((m, wk))
+            if v is None:
+                continue                      # week not traded that month
+            if v < 0:
+                streak.append(m)
+                if len(streak) >= PAUSE_LOSING_MONTHS:
+                    pause_month, streak = m + 1, []
+                    last_two = (m - 1, m)
+            else:
+                streak = []
+        if pause_month == cur:
+            names = [datetime.date(x // 12, x % 12 + 1, 1).strftime("%b %Y") for x in last_two]
+            out[wk] = f"lost {names[0]} + {names[1]}"
+    return out
+
+
+def stable_read(read, key) -> Optional[Any]:
+    """Call read() until two consecutive results have the same key(); None
+    results are retried. Returns the agreed result, or None (= not trusted).
+    Guards against MT5 returning a half-synced history (dip bot, 29 Oct 2026)."""
+    prev = None
+    for i in range(STABLE_READ_TRIES + 1):
+        cur = read()
+        if cur is not None and prev is not None and key(cur) == key(prev):
+            return cur
+        prev = cur
+        if i < STABLE_READ_TRIES:
+            time.sleep(STABLE_READ_PAUSE)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +308,89 @@ class GoldStraddleStrategy:
         deals = mt5.history_deals_get(start, now + datetime.timedelta(minutes=1)) or ()
         return any(d.magic == s["magic"] and d.symbol == s["symbol"] for d in deals)
 
+    # ------------------------------------------------------------ daily checks
+    def _movement_check(self, now: datetime.datetime) -> Tuple[bool, str]:
+        """(ok_to_trade, message). H1 bars re-read from MT5 every call."""
+        start = now - datetime.timedelta(days=FILTER_LOOKBACK_DAYS)
+        # finished bars only: stop 1s before today 00:00, so the live 00:00
+        # bar (still changing) never makes two reads differ
+        end = now.replace(hour=0, minute=0, second=0, microsecond=0) - datetime.timedelta(seconds=1)
+
+        def read():
+            r = mt5.copy_rates_range(FILTER_SYMBOL, mt5.TIMEFRAME_H1, start, end)
+            return None if r is None or len(r) == 0 else r
+
+        rates = stable_read(read, lambda r: (len(r), int(r[-1]["time"]), float(r[-1]["high"])))
+        if rates is None:
+            return False, f"Movement filter: H1 history not stable/available ({mt5.last_error()}) — skipping"
+        bars = [(int(r["time"]), float(r["high"]), float(r["low"])) for r in rates]
+        newest = max((_ts(t).date() for t, _, _ in bars if _ts(t).date() < now.date()), default=None)
+        if newest is None or (now.date() - newest).days > FILTER_MAX_GAP_DAYS:
+            return False, f"Movement filter: H1 history looks stale (newest day {newest}) — skipping"
+        med, n = median_early_range(bars, now.date())
+        if med is None:
+            return False, f"Movement filter: only {n} days of H1 bars (< {FILTER_DAYS}) — skipping"
+        if med < FILTER_MIN_RANGE:
+            return False, f"Quiet market: median 00-08 UTC range ${med:.2f} < ${FILTER_MIN_RANGE:.0f} — skipping"
+        return True, f"median range ${med:.2f}"
+
+    def _closed_trades(self, now: datetime.datetime) -> Optional[List[Tuple[datetime.date, float]]]:
+        """(open date UTC, net P&L per 0.01 lot) per closed position of ALL gold
+        straddle setups, from MT5 deal history. Positions are found by the magic
+        on their deals, then every deal of that position is summed (profit +
+        swap + commission + fee), whatever magic the exit deal carries. P&L is
+        scaled to 0.01 lot (the backtest unit) so growing lots don't change a
+        month's sign. Returns None if the history read is not trusted."""
+        months = PAUSE_LOOKBACK_MONTHS + 1
+        start = now - datetime.timedelta(days=31 * months + 7)
+        end = now + datetime.timedelta(minutes=1)
+        # history_deals_get returns None on error, () when there are no deals
+        deals = stable_read(lambda: mt5.history_deals_get(start, end),
+                            lambda d: (len(d), max((x.ticket for x in d), default=0)))
+        if deals is None:
+            return None
+        magics = {s["magic"] for s in SETUPS}
+        ours = {d.position_id for d in deals
+                if d.magic in magics and d.symbol == FILTER_SYMBOL and d.position_id}
+        still_open = {p.ticket for p in (mt5.positions_get(symbol=FILTER_SYMBOL) or ())}
+        first: Dict[int, Any] = {}
+        net: Dict[int, float] = {}
+        for d in deals:
+            pid = d.position_id
+            if pid not in ours or pid in still_open:
+                continue
+            if pid not in first or d.time < first[pid].time:
+                first[pid] = d                      # opening deal (earliest)
+            net[pid] = net.get(pid, 0.0) + d.profit + d.swap + d.commission + getattr(d, "fee", 0.0)
+        out = []
+        for pid, v in net.items():
+            vol = first[pid].volume or 0.01
+            out.append((_ts(first[pid].time).date(), v * 0.01 / vol))
+        return out
+
+    def _week_check(self, now: datetime.datetime) -> Tuple[bool, str]:
+        wk = week_of_month(now.day)
+        trades = self._closed_trades(now)
+        if trades is None:
+            return False, f"Week pause: deal history not stable/available ({mt5.last_error()}) — skipping"
+        paused = paused_weeks(trades, now.date())
+        if wk in paused:
+            return False, f"Week {wk} paused this month ({paused[wk]}) — skipping"
+        return True, f"week {wk} active"
+
+    def daily_checks(self, now: Optional[datetime.datetime] = None) -> Tuple[bool, str]:
+        """Both checks; same answer for both setups on a given day."""
+        now = now or _utc_now()
+        if now.date() < FILTERS_FROM:
+            return True, f"daily checks off until {FILTERS_FROM}"
+        ok, msg_m = self._movement_check(now)
+        if not ok:
+            return False, msg_m
+        ok, msg_w = self._week_check(now)
+        if not ok:
+            return False, msg_w
+        return True, f"{msg_m}, {msg_w}"
+
     # ------------------------------------------------------------ sizing
     def _lot(self, s: Dict[str, Any]) -> float:
         """balance * risk% / (SL * $ per 1.0 move per lot), from the symbol's
@@ -237,6 +421,10 @@ class GoldStraddleStrategy:
             return "Already in a trade / straddle pending"
         if self._traded_since(s, open_at, now):
             return "Already traded this session"
+
+        ok, why = self.daily_checks(now)
+        if not ok:
+            return why
 
         tick = self._tick(sym)
         if tick is None:
@@ -283,7 +471,7 @@ class GoldStraddleStrategy:
                 if t is not None:
                     self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": t}, "rollback")
             return "Order send failed — rolled back"
-        return (f"Straddle placed: buy {buy_stop} / sell {sell_stop}, {lots} lots, "
+        return (f"Straddle placed ({why}): buy {buy_stop} / sell {sell_stop}, {lots} lots, "
                 f"SL {buy_sl}/{sell_sl}, expires {expiry:%H:%M}")
 
     # ------------------------------------------------------------ management
@@ -417,4 +605,8 @@ class GoldStraddleStrategy:
                 f"{s['trigger_hour']:02d}:{s['trigger_minute']:02d} UTC, +/-${s['offset']} stops, "
                 f"SL ${s['sl']}, BE +${s['be_trigger']}, trail ${s['trail']}, "
                 f"expire {s['cancel_hour']:02d}:00, risk {s['risk_pct']}%, magic {s['magic']}")
+        lines.append(
+            f"  Daily checks from {FILTERS_FROM}: skip if median 00-{FILTER_END_HOUR:02d} UTC range "
+            f"of last {FILTER_DAYS} days < ${FILTER_MIN_RANGE:.0f}; week pause B "
+            f"({PAUSE_LOSING_MONTHS} losing months in a row -> skip next month)")
         return "\n".join(lines)

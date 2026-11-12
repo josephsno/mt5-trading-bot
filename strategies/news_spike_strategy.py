@@ -1,1499 +1,412 @@
+# strategies/news_spike_strategy.py
 """
-News Spike Strategy — Live Version (stateless)
-================================================
-Edge   : Straddle-at-release entry (same OCO pattern as
-         news_reload_strategy.py), but radically simplified on the exit
-         side: NO take-profit, NO reload chain. Once a position opens, it
-         gets a HARD 1-MINUTE force-close — win or lose, whatever it's
-         worth at that moment, it closes. After that single close (or an
-         SL hit, if that happens first), this specific event is DONE —
-         no re-entry, no matter how much time is left in the trigger
-         window.
+News Spike Strategy — gold straddle at NFP / CPI / FOMC (stateless)
+===================================================================
+Entry  : 2 seconds before each scheduled release (NFP + CPI 08:30 New York,
+         FOMC decision 14:00 New York), mid = (bid+ask)/2:
+         buy-stop at mid + $3, sell-stop at mid - $3, GTC. No OCO: if price
+         reaches both sides, both fill (backtested: 12 of 49 events, net
+         -$6.35 per unit across those 12 — accepted).
+SL     : $7 from the stop level; re-anchored to the REAL fill price the
+         first poll after a fill (entry slippage correction).
+Exit   : release + 60 s: every own position is closed at market and every
+         own pending order cancelled. Nothing re-enters for that event.
+         Stateless: at any poll OUTSIDE [release - 2 s, release + 60 s) the
+         bot closes/cancels whatever of its own is still there — so a missed
+         poll can never leave a trade running past its minute.
+Risk   : 1% of balance per trade on the $7 stop (was 14% — the reason the
+         strategy was stopped on 2026-10-06; Joseph, 2026-11-02). Minimum lot
+         if 1% is smaller. A bad release can still cost ~2x the planned 1%
+         (SL fills slip in a fast spike; MT5 has no deviation on a stop).
+Scope  : touches ONLY its own magic (20260807) — the gold straddle (00:00/01:00),
+         gold hat long, dip bot, pre-FOMC and USDJPY bots keep their trades
+         through the release. FLATTEN_OTHER_BOTS = True brings back the old
+         behaviour (close all gold 10 min before, whole account at +60 s),
+         which none of the other backtests assumed.
+Times  : release times are worked out from New York wall-clock time with the
+         US daylight-saving rule in code (no tzdata needed on Windows) —
+         no hand-typed "2 seconds early" UTC literals any more (they went
+         wrong three times: wrong seconds, a stray 16:49 CPI, a #test entry
+         that fired on the live account).
+Clock  : `now` is broker-corrected: the freshest XAUUSDm tick (milliseconds)
+         is compared with the VPS clock and only a real gap (>= 5 s, e.g. the
+         64 s seen on 2026-09-14) is corrected. Keep Windows time sync on.
 
-         The idea: capture only the very first, immediate reaction to a
-         scheduled release, then get out before a possible reversal —
-         rather than staying in the market and riding it.
+EVIDENCE (XAUUSDm)
+  1-minute gold 2024-2025: NFP 59% win (22 events), CPI 55% (22), FOMC 67%
+  (15); each beat 97-100% of 200 random-time tests.
+  Exness tick replay Jan 2025 - Sep 2026: 49 events traded, 73.5% win.
+  One-side fills win 89%; both-side fills win 25%. Net +$567 per unit at a
+  $7 SL. Average slippage ~$1.40 in / $1.46 out, worst exit slip ~$9.57.
+  2026 payoffs were much bigger than 2025's (volatile gold year) — don't
+  assume 2026 dollar sizes repeat. The 2 s early entry was not separately
+  re-backtested (earlier tests used 5 s / 3 s).
 
-Entry  : Buy-stop + sell-stop straddle, placed in a narrow PRE-RELEASE
-         window only (see "Entry window" below) — offset from the
-         anchor price (per-symbol distance below). Whichever side fills
-         is the trade. Covers NFP, CPI, and FOMC — each on its own
-         schedule (NFP/CPI at 8:30 AM ET, FOMC at 2:00 PM ET).
-SL     : Real per-symbol stop — can still trigger before the 1-minute
-         mark if price moves against it fast enough. Confirmed via real
-         Sept 4 2026 tick-level analysis this SL is a price level, not a
-         payment cap — a fast cascade can jump straight through it.
-Exit   : Hard 1-minute force-close, no TP, no reload. Whichever comes
-         first — the SL hitting, or 60 seconds elapsing — ends the
-         trade. Exit deviation is effectively uncapped so this close
-         cannot get rejected and silently retried through a volatile
-         window.
-Sizing : FLAT 14% risk_pct on ALL event types (NFP, CPI, FOMC) as of
-         2026-09-12 (see CHANGE LOG) — explicit final decision, replacing
-         an earlier differentiated split (NFP 5%/CPI 2%/FOMC 2%, tested
-         the same day, also considered). Backtest across all 49
-         tick-validated events (Jan 2025-Sep 2026), compounding from a
-         $200 nominal balance: final balance $116,679.00 (58,240% total
-         return), max drawdown -37.0% (peak $3,501.95 on 2026-03-06,
-         trough $2,207.43 on 2026-05-12 — a ~10-week, 5-of-6-losing-event
-         stretch), worst single trade -14.0%, win/loss dollar ratio
-         4.81:1. This is more aggressive than the differentiated split
-         (-23.9% drawdown, 10.81:1 ratio) — chosen anyway, as an explicit
-         decision, not a backtest-driven optimum. Roughly 90%+ of the
-         total historical gain traces to a small handful of large 2026
-         NFP events (Feb 11, Mar 6, Jul 2, Aug 7, Sep 4) — this sizing
-         is a real bet that events of that shape keep recurring, not a
-         statistically settled allocation. Every SL-hit loss under this
-         sizing is capped at exactly -14% of balance at the time (see
-         the entry-slippage SL correction below) — no loss in the
-         backtested history ever exceeded that.
-Filter : NONE — tested and removed for this mechanic specifically.
-
-Entry window : Every date in the three schedule constants below is
-         stored 1 SECOND EARLY relative to the real, source-verified
-         release time (narrowed from 3s to 1s on 2026-09-12, see CHANGE
-         LOG). The entry window opens at the stored (early) time and
-         closes hard AT the real release. If a straddle has not been
-         placed by the real release moment, that symbol sits out the
-         event entirely — no retry after price has already moved.
-
-*** VALIDATED EVIDENCE — XAUUSDm ONLY ***
-XAUUSDm is backed by real, minute-level, control-tested backtest data
-(2024-01-02 to 2025-12-05 — 59.1%/54.5%/66.7% win rates, all beat
-random-time controls), PLUS a full tick-level re-validation across Jan
-2025-Sep 2026 (49 events, see 2026-09-12 CHANGE LOG) that directly
-informed the per-event-type risk split now live. Still worth
-remembering: 2026's per-event payoff sizes were much larger than
-2025's on this same mechanic, most plausibly a market-regime effect
-(2026 gold has been far more volatile/trending than 2025), not
-evidence the mechanic itself got better. Sizing decisions should not
-assume 2026's dollar magnitudes repeat. NOTE: the 1s-early entry window
-change (below) was NOT re-backtested against tick data before going
-live — see that CHANGE LOG entry for why, and what to watch for.
-
-*** XAGUSDm REMOVED 2026-09-11 *** — see CHANGE LOG. Only XAUUSDm is
-traded by this file now.
-
-*** COPPER (XCUUSDm) REMOVED 2026-09-08 *** — see CHANGE LOG.
-
-*** STILL DEMO ONLY ***
-
-CHANGE LOG (2026-09-17, EARLY_ENTRY_SECONDS 1s -> 2s):
-  - EARLY_ENTRY_SECONDS changed 1.0 -> 2.0. All three schedule constants
-    (NFP/CPI/FOMC_SCHEDULE_UTC) manually re-shifted from :59 to :58
-    seconds to match. NOT independently backtested at this value, same
-    as the 3s->1s change on 2026-09-12.
-
-CHANGE LOG (2026-09-17, remove per-position release-anchored close):
-  - REMOVED the separate per-position force-close logic that used to run
-    inside manage_open_trade() (deadline computed via
-    _release_time_for_position() + cfg["max_hold_seconds"], closed via
-    _close_position_at_market()). It was a second, independent path to
-    the exact same deadline check_global_flatten() already enforces
-    (real_release_time + max_hold_seconds, portfolio-wide) — redundant,
-    and a second place a timing bug could hide. Per explicit decision:
-    closing this strategy's own XAUUSDm positions is now handled
-    entirely by check_global_flatten(), same as pending-order cleanup
-    already was (see the 2026-09-14 CHANGE LOG entry that made
-    manage_pending_orders() a pure status read for the same reason).
-    manage_open_trade() now only corrects SL for entry slippage and
-    reports status — it no longer computes a deadline or calls
-    _close_position_at_market() itself.
-  - REMOVED _release_time_for_position() and _close_position_at_market()
-    entirely — both were only ever called from the removed logic above,
-    now dead code.
-  - IMPORTANT: check_global_flatten() must still be called once per poll
-    cycle, outside the per-symbol loop, or nothing will close these
-    positions at all — this file does not change that requirement, it
-    only removes the redundant second mechanism.
-
-CHANGE LOG (2026-09-14, drop broker-side SPECIFIED expiration entirely):
-  - The 10022 'Invalid expiration' rejection kept recurring even after
-    the clock-skew fix and after removing the "#test" calendar entry —
-    which meant it was never really a clock or calendar problem. This
-    strategy's whole design asks an order to expire ~60 seconds from
-    the moment it's placed (real_release_time + max_hold_seconds). If
-    Exness enforces a minimum lead time on ORDER_TIME_SPECIFIED longer
-    than ~60 seconds (plausible and consistent with every observation
-    so far — expiration_mode confirmed SPECIFIED is supported in
-    principle, so a minimum-lead-time rule is the remaining explanation),
-    EVERY real event would hit this same rejection, not just this one
-    test — a structural problem, not an incidental one.
-  - FIXED by no longer asking the broker to enforce the expiration at
-    all: pending orders are now placed with ORDER_TIME_GTC (no
-    "expiration" field) instead of ORDER_TIME_SPECIFIED. Deadline
-    enforcement is handled purely by normal closure — check_global_
-    flatten() already unconditionally cancels EVERY pending order on
-    the account (no per-order field lookups, no event-matching needed)
-    at the same real_release_time + max_hold_seconds deadline used
-    everywhere else in this file. manage_pending_orders() was
-    simplified to a plain status read; an earlier version of this fix
-    tried to track each pending order's own setup time and cancel it
-    individually, which added fragility (the setup-time field's exact
-    name varies across MT5 Python package builds) for no real benefit
-    over just relying on the global flatten, so that was removed.
-
-CHANGE LOG (2026-09-14, comment-length rejection + silent flatten failures):
-  - FIXED a real live rejection: mt5.order_send() was returning None with
-    last_error() = (-2, 'Invalid "comment" argument') on every close/cancel
-    issued by _flatten_entire_account(), because its comment string
-    ("news_spike_global_event_flatten", 31 chars) exceeds MT5's safe
-    comment-length limit (reliably fine under ~26-28 chars; ~31 sits right
-    at the edge and gets rejected by this broker/build). Shortened to
-    "spike_global_flatten" (21 chars). _flatten_symbol()'s comment
-    ("news_spike_pre_event_flatten", 28 chars) was at the same edge and
-    was shortened pre-emptively to "spike_pre_flatten" (18 chars), even
-    though it had not yet been observed failing.
-  - FOUND while fixing the above: _flatten_entire_account() and
-    _flatten_symbol() only ever appended to their `actions` list on a
-    confirmed TRADE_RETCODE_DONE. A rejected order_send (including the
-    comment-length rejection above) was silently swallowed — the caller
-    saw "already flat" even when real positions/orders were still open
-    and every close attempt had just failed. Both methods now also track
-    failed attempts explicitly and report them distinctly from "nothing
-    to do", so a real un-flattened position can never again be reported
-    as an already-flat account.
-  - REMOVED a live "#test" entry from FOMC_SCHEDULE_UTC
-    (2026-09-14 17:39:59 UTC) that had been left in the real schedule
-    list and fired for real on the live account tonight, triggering both
-    the original expiration/rejection issue and, downstream, the
-    comment-length failures above during its post-event global flatten
-    window. Real FOMC dates are unaffected — only the injected test
-    literal was removed.
-
-CHANGE LOG (2026-09-12, EARLY_ENTRY_SECONDS narrowed to 1s + naming fix):
-  - EARLY_ENTRY_SECONDS changed 3.0 -> 1.0. Per explicit instruction,
-    final change of this session. NOT independently backtested against
-    tick data before this change — unlike every other parameter change
-    in this file's history (offset, SL, risk_pct, hold time), this one
-    went live on judgment alone. Worth being aware of the mechanism this
-    revisits: the 2026-09-09 CHANGE LOG entry (5s -> 3s) explicitly
-    noted narrowing the window does NOT reduce slippage — slippage
-    happens in the seconds AFTER the real release triggers the order,
-    not in how many seconds early the resting order was placed — and
-    that a narrower window only raises the odds a poll cycle steps over
-    it and misses the entry entirely. That reasoning applies exactly the
-    same going from 3s to 1s, more acutely: 1 second is a tight target
-    for even 1-second-cadence polling to reliably land inside. If entries
-    start being missed after this change, that mechanism is the first
-    place to look.
-  - ALL THREE schedule constants (NFP/CPI/FOMC_SCHEDULE_UTC) manually
-    re-shifted from 3s-early to 1s-early to match (:57 -> :59 seconds
-    field throughout) — same class of bug already caught twice before in
-    this file's history (2026-09-09 or literals stayed 5s-early after the
-    constant changed to 3.0; 2026-09-11 FOMC literals were stored 57s
-    AFTER release instead of 3s before). Every literal was individually
-    checked against the real release time this time, not just pattern-
-    matched.
-  - FOUND AND FIXED, while re-shifting: CPI_SCHEDULE_UTC's Sept 11, 2026
-    entry was stored as `16, 49, 57` — completely inconsistent with its
-    own adjacent comment, which correctly states the real release is
-    12:30:00 UTC and the stored value should be 3s-early (12:29:57).
-    This was a stale/corrupted literal, not a real 16:49 event. Corrected
-    to the proper 1s-early value (12:29:59) based on the real, already-
-    source-verified release time. If this file was deployed with the
-    16:49:57 value at any point, that CPI event's entry window would
-    never have opened during the actual release at all.
-  - FIXED the import in main_news_spike.py: it was importing
-    NewsSpikeStrategy and the schedule constants from
-    `strategies.news_confirm_strategy` (a DIFFERENT strategy — wait-and-
-    confirm entry, trail-managed exit, MAGIC=20260801) instead of
-    `strategies.news_spike_strategy` (THIS file, MAGIC=20260807). This
-    was flagged early in this session and deliberately set aside at the
-    time ("the import is the least of our worries") while the actual
-    mechanics were worked out — fixed now as part of final cleanup.
-    Everything in this file's own CHANGE LOG assumes it's the strategy
-    actually being run; if the import was never fixed, none of it would
-    have been.
-
-CHANGE LOG (2026-09-12, flat 14% risk_pct across all event types):
-  - CHANGED RISK_PCT_BY_EVENT from a differentiated split (NFP 5% / CPI
-    2% / FOMC 2%, itself only hours old) to FLAT 14% on all three event
-    types. Explicit final decision, not a backtest-optimum — the
-    differentiated split had a better risk-adjusted profile (-23.9% max
-    drawdown, 10.81:1 win/loss ratio, $26,681.73 final on the same
-    49-event, $200-start sequence) than flat 14% (-37.0% max drawdown,
-    4.81:1 ratio, $116,679.00 final). Flat 14% makes roughly 4.4x more
-    on this specific historical sequence, at meaningfully worse drawdown
-    and a materially worse win/loss ratio — chosen anyway. Worth
-    remembering going in: the max-drawdown stretch (peak $3,501.95 on
-    2026-03-06, trough $2,207.43 on 2026-05-12) spans 5 losing events
-    out of 6 across roughly 10 weeks of real calendar time before
-    recovering — a real period to be prepared to sit through, not a
-    single bad day.
-  - This sizing decision was tested specifically WITH the entry-
-    slippage SL correction (see that CHANGE LOG entry) already active.
-    Without that fix, the same flat-14% sequence would have produced a
-    worse outcome on both counts: $96,904.76 final (vs $116,679.00) and
-    -44.7% max drawdown / -23.7% worst single trade (vs -37.0% / -14.0%)
-    — the SL correction is doing real, measurable work at this risk
-    level specifically, not just a theoretical nicety.
-
-CHANGE LOG (2026-09-12, entry-slippage SL correction):
-  - Added _correct_sl_for_slippage(), called from manage_open_trade() for
-    every open position the instant it's found. Fixes a real, distinct
-    risk-sizing gap: the SL submitted with a pending stop order is a
-    FIXED PRICE calculated from the INTENDED trigger level at placement
-    time. If the entry itself slips (fills at a worse price than the
-    intended stop level during a fast cascade — real, documented
-    behavior on this account), that fixed SL doesn't move with it, so
-    the realized risk distance from actual entry to SL widens beyond
-    what risk_pct was sized for, on every trade where entry slips
-    against the position. This re-anchors the SL to the REAL fill price
-    (position.price_open) the moment a position is detected, keeping the
-    realized risk distance consistently at cfg["sl"] regardless of how
-    much the entry slipped. Idempotent — safe to call every cycle, no-op
-    once already correct.
-  - IMPORTANT DISTINCTION, not fixed by this change: this addresses
-    ENTRY-side slippage only. It does NOT address the SL's OWN fill
-    slipping when it later triggers during a fast cascade — that's the
-    separate, previously-documented ~$40-worst-case-against-a-nominal-$7
-    risk (see "Sizing" section above and the 2026-09-08 CHANGE LOG),
-    which remains architecturally unfixable in MT5 (no deviation/
-    tolerance control exists on a triggered stop-loss). The two
-    slippage sources are independent; this change narrows one of them,
-    not both.
-
-CHANGE LOG (2026-09-12, simplified to a single T+60s close — no lingering):
-  - Collapsed everything down to ONE deadline: real_release_time +
-    max_hold_seconds (T+60s), full stop. Per explicit decision, removed
-    two things that had crept in as separate, disconnected timers:
-    (1) pending orders no longer get a 5-minute MT5-side expiration —
-    they now expire at the SAME T+60s moment everything else closes,
-    via the same real_release_time + max_hold_seconds calculation used
-    everywhere else in this file; (2) the portfolio-wide global flatten
-    no longer runs across a separate 2-minute (GLOBAL_FLATTEN_WINDOW_
-    SECONDS) window after T+60s — it now targets that same single T+60s
-    moment, with only a short GLOBAL_FLATTEN_RETRY_SECONDS (15s) safety
-    margin for a rejected order_send to get a couple more attempts on
-    the same tight 1-second cadence, not a genuinely separate later
-    closing window.
-  - Net effect: at T+60s, in one shot — both pending stop orders
-    (whichever side never filled, if any), any open position(s) on
-    XAUUSDm (both legs if a dual-fill occurred), and every other open
-    position/pending order on the whole account (any symbol, any
-    strategy's magic) all close/cancel together. Nothing is designed to
-    linger past that single moment.
-  - Tight 1-second polling (see main_news_spike.py) now runs
-    continuously from T-2min through T+60s with no drop back to 30s in
-    between, since there is no longer a reason to distinguish an
-    "entry-window" tight band from a "post-event" tight band — it's one
-    continuous tight-polling stretch covering the whole event lifecycle,
-    then a short retry margin, then back to normal 30s cadence.
-
-CHANGE LOG (2026-09-12, portfolio-wide flatten at event deadline):
-  - Added _flatten_entire_account() / check_global_flatten(): at
-    real_release_time + max_hold_seconds (the SAME deadline used for
-    this strategy's own gold positions, see the OCO/release-anchored
-    close entry above), EVERY open position and EVERY pending order
-    across the WHOLE ACCOUNT closes/cancels — not just this strategy's
-    own XAUUSDm trades. This is a deliberate, explicit design decision,
-    not scope creep: NFP/CPI/FOMC move the US dollar broadly, not just
-    gold, so a straddle_strategy.py position on EURUSDm/USDJPYm/GBPUSDm
-    (MAGIC=20260716, a completely different strategy/process) sitting on
-    unrealized profit at the moment of a shared-currency news shock is
-    exposed to the same reversal risk gold itself is being protected
-    from by its own hard 60-second close. Rather than have this file try
-    to reach into straddle_strategy.py's own state, the flatten is
-    unconditional and symbol/magic-blind: mt5.positions_get() and
-    mt5.orders_get() with NO filters, closing/cancelling everything
-    found. This intentionally breaks this project's usual pattern of
-    strategies never touching each other's state — the FOMC/NFP/CPI
-    reset is a deliberate, narrow exception to that pattern, not a
-    general precedent.
-  - IMPORTANT — REQUIRES A MAIN-LOOP CHANGE NOT MADE IN THIS FILE:
-    check_global_flatten(now) must be called ONCE PER POLL CYCLE by
-    main_news_spike.py, OUTSIDE the per-symbol loop (unlike
-    manage_pending_orders()/manage_open_trade()/check_and_place(),
-    which are called once per symbol in traded_symbols — currently just
-    XAUUSDm). Confirmed wired in — see main_news_spike.py.
-  - GLOBAL_FLATTEN_WINDOW_SECONDS = 120.0: the flatten stays "active"
-    (keeps retrying, idempotently — closing zero positions costs
-    nothing) for 2 minutes after each event's release+60s deadline, in
-    case the first attempt hits a rejected order_send during volatility.
-    Outside that window, check_global_flatten() is a no-op every cycle,
-    so this doesn't run 24/7 for no reason — only in a narrow band
-    around each scheduled event.
-    *** SUPERSEDED LATER THE SAME DAY (2026-09-12) *** — see the
-    "simplified to a single T+60s close" entry above this one.
-    GLOBAL_FLATTEN_WINDOW_SECONDS (120s) no longer exists as a constant;
-    replaced by GLOBAL_FLATTEN_RETRY_SECONDS (15s), a much shorter pure
-    safety margin rather than a genuinely separate later window.
-
-CHANGE LOG (2026-09-12, OCO cancellation removed + release-anchored close):
-  - REMOVED the opposite-order cancellation in manage_pending_orders().
-    Previously, the instant one side of the straddle filled, this method
-    cancelled the other pending order — the intent was clean OCO
-    behavior, but under real poll-cycle timing that cancellation could
-    lag by up to a full poll interval, producing an uncontrolled,
-    unintended dual-fill (both sides filling) on a real but unpredictable
-    minority of events. Per explicit decision: rather than keep chasing
-    that race condition, BOTH sides are now allowed to fire freely if
-    price reaches both offsets. This is a deliberate acceptance of
-    occasional double exposure on a single event, not a bug — backtested
-    across 49 real events (Jan 2025-Sep 2026), real dual-fills occurred
-    on 12 of 49 (~24%), net -$6.35/unit across those 12. Small, bounded,
-    accepted cost of a simpler system.
-  - REPLACED entry-time-based force-close with a RELEASE-ANCHORED hard
-    deadline. Previously, manage_open_trade() closed each position
-    max_hold_seconds (60s) after THAT position's own open time
-    (pos.time) — meaning a late-filling second leg got its own fresh 60
-    seconds, sometimes closing 80-90+ seconds after the real release.
-    Now, EVERY position tied to a given event — whichever side, whenever
-    it actually filled — closes at the SAME fixed moment:
-    real_release_time + max_hold_seconds. A leg that fills late gets
-    whatever time is left until that shared deadline, not a fresh 60
-    seconds. Added _release_time_for_position() to derive which event a
-    given position belongs to (the most recent real release at or before
-    the position's own open time) — stateless, same pattern as
-    everything else in this file, no stored event-to-position mapping.
-    *** REMOVED 2026-09-17 *** — see the top CHANGE LOG entry. This
-    per-position mechanism was superseded by relying on
-    check_global_flatten() alone, same deadline, one path instead of two.
-  - FIXED a real bug this change exposed: _get_position() only ever
-    returned the FIRST matching open position for this strategy's MAGIC
-    number. Once OCO cancellation is removed, a dual-fill produces TWO
-    simultaneous open positions with the same MAGIC on the same symbol
-    (requires hedging mode, already a documented account requirement).
-    The old code would have force-closed only one of the two — the
-    other would have stayed open indefinitely with no exit logic ever
-    checking on it again. Added _get_positions() (plural) returning ALL
-    of this strategy's own open positions on a symbol; manage_open_trade()
-    now iterates and force-closes each independently once past ITS
-    event's release+60s deadline. has_open_position() / has_own_open_trade()
-    updated to check for ANY open position, not just a single one.
-
-CHANGE LOG (2026-09-12, per-event-type risk_pct):
-  - Replaced flat risk_pct=2.0 (same for every event type) with
-    RISK_PCT_BY_EVENT = {"NFP": 5.0, "CPI": 2.0, "FOMC": 2.0}.
-    SUPERSEDED later the same day by flat 14% — see entry above.
-  - Backing evidence: full tick-level backtest, Jan 2025-Sep 2026, 49
-    validated events (52 scheduled, 3 never triggered within the
-    release+60s window and produced no trade). Real dual-fills occurred
-    on 12 of the 49 (~24%), net -$6.35/unit across those 12. Net result
-    across all 49 events at $7 SL, $1/unit terms: +$567.09, 73.5% win
-    rate.
-
-CHANGE LOG (2026-09-11, schedule fixes):
-  - FIXED FOMC_SCHEDULE_UTC: every literal was stored as XX:00:57 (57s
-    AFTER real release) instead of XX:59:57 (3s before). Corrected.
-    NFP/CPI literals checked and found correct AT THE TIME — the CPI
-    Sept 11 literal was found stale/wrong later, see 2026-09-12 entry
-    above.
-  - Removed stale 2026-09-09 NFP test entry.
-  - Moved a misfiled NFP-labeled entry to CPI_SCHEDULE_UTC.
-  - XAUUSDm risk_pct changed AGAIN, 33.2143 -> 2.0.
-  - REMOVED XAGUSDm from SYMBOL_CONFIG entirely.
-  - XAUUSDm offset REVERTED from 4.0 back to 3.0 (original 2026-08-07
-    value). SL left at 7.0.
-
-CHANGE LOG (2026-09-08):
-  - REMOVED XCUUSDm (copper).
-  - risk_pct changed from differentiated to FLAT 7% (XAU/XAG).
-  - `_close_position_at_market()` / `_flatten_symbol()` deviation
-    changed from 10 to EXIT_DEVIATION (effectively uncapped).
-
-CHANGE LOG (2026-09-09):
-  - EARLY_ENTRY_SECONDS changed 5.0 -> 3.0. Does NOT reduce slippage —
-    a narrower window only raises the odds a poll cycle steps over it
-    and misses the entry entirely. SUPERSEDED 2026-09-12 (3.0 -> 1.0).
-  - All schedule literals re-shifted from 5s-early to 3s-early to match.
-
-CHANGE LOG (2026-09-04, risk_pct redistribution):
-  - risk_pct redistributed across XAUUSDm/XAGUSDm/XCUUSDm. SUPERSEDED
-    2026-09-08.
-
-CHANGE LOG (2026-09-04, gold/silver/copper only):
-  - FX pairs (EURUSDm, GBPUSDm, USDJPYm, USDCADm) REMOVED entirely.
-
-CHANGE LOG (2026-09-04, entry-window/polling changes):
-  - All three schedule constants shifted 5s EARLY (later 3s, later 1s)
-    relative to real release times — fixes live rejections from anchor-
-    price staleness and dynamic trade_stops_level widening at the exact
-    release moment. Resting orders placed before release sidestep both.
-  - `_next_event_trigger_window()` narrowed to a HARD pre-release-only
-    window — no retry after real release.
-  - `_next_flatten_window()` default lead_minutes changed 5.0 -> 10.0.
-  - Requires ~1s main-loop polling to be reliable near a scheduled
-    event (not enforced in this file — that's main_news_spike.py's job).
-
-CHANGE LOG (2026-08-30):
-  - Added XCUUSDm (copper), risk_pct=3.2143%. REMOVED 2026-09-08.
-
-CHANGE LOG (2026-08-12):
-  - Re-added the unconditional final flatten check immediately before
-    order placement in check_and_place().
-  - Trimmed to 6 symbols (XAUUSDm, XAGUSDm, EURUSDm, GBPUSDm, USDJPYm,
-    USDCADm).
-  - FX offset/SL settled at 12/20 pips.
-  - Flatten lead time set to 5 minutes (later revised to 10).
-  - Added _next_flatten_window()/_flatten_symbol().
-  - Lot sizing rewritten to pull live from
-    mt5.symbol_info(symbol).trade_tick_value/trade_tick_size.
-
-CHANGE LOG (2026-08-11, earlier same day):
-  - Added XAGUSDm + 7 major USD pairs (later trimmed to 4).
-  - Added `decimals` to SYMBOL_CONFIG per symbol.
-  - Added automatic hedging-mode check at import time (informational).
-
-CHANGE LOG (prior revision):
-  - Expanded from NFP-only to three event types: NFP, CPI, FOMC.
-  - Removed the FOMC-proximity filter entirely.
-
-CHANGE LOG (initial):
-  - Initial build. Fourth standalone strategy, own MAGIC number, own
-    process. Includes the "already traded this event" guard from the
-    start, given a live bug found in news_reload_strategy.py.
+KNOWN LIMITS: ~3 trades a month, so a few bad releases make a losing
+quarter. Dates must be added each year (the bot warns 40 days ahead).
+Account must be in hedging mode (the gold straddle can hold gold at the
+same time).
 """
 
 from __future__ import annotations
 
 import datetime
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 import MetaTrader5 as mt5
 
 # ---------------------------------------------------------------------------
-# Event calendars — MANUALLY MAINTAINED. Three separate schedules, one per
-# event type, each source-verified (BLS for NFP/CPI, Federal Reserve for
-# FOMC) — do not assume a fixed-rule pattern for any of them; the 2025
-# government shutdown proved that assumption can silently break.
-#
-# *** All timestamps below are stored 1 SECOND EARLY relative to the real
-# release time (e.g. real NFP release 12:30:00 UTC -> stored as 12:29:59).
-# Narrowed from 3s to 1s on 2026-09-12 — see CHANGE LOG. The real release
-# moment for any entry here is `release_time + EARLY_ENTRY_SECONDS` (now
-# 1 second).
-#
-# IMPORTANT: these are LITERAL, hand-typed timestamps — NOT computed from
-# EARLY_ENTRY_SECONDS. If EARLY_ENTRY_SECONDS is ever changed again, every
-# literal below must be manually re-shifted to match, or the window-open
-# time and the code's internal "real release" time drift out of sync.
-# This has happened twice before (2026-09-09, 2026-09-11) — double-check
-# every literal against its own real release time, not just the pattern.
-#
-# DO NOT add ad-hoc "#test" entries directly to these live lists again —
-# one was added and fired for real on the live account on 2026-09-14
-# (17:39:59 UTC), triggering real order rejections and a real (if
-# ultimately harmless) global-flatten failure. Test entry-window logic
-# against a copy of the calendars or with a mocked `now`, not by editing
-# the live schedule.
+# Config
 # ---------------------------------------------------------------------------
+SYMBOL = "XAUUSDm"
+MAGIC = 20260807               # straddle 20260716, confirm 20260801, reload 20260810,
+                               # gold straddle 20261011/12, dip 20261028/29, pre-FOMC 20261034-36
+OFFSET = 3.0                   # $ from mid to each stop
+SL = 7.0                       # $ from the fill
+RISK_PCT = 1.0                 # % of balance at the $7 stop
+DECIMALS = 2
+EARLY_ENTRY_SECONDS = 2.0      # straddle placed in [release - 2 s, release)
+HOLD_SECONDS = 60.0            # everything closed at release + 60 s
+EXIT_DEVIATION = 500           # points — exits must not be refused
+STALE_TICK = datetime.timedelta(minutes=10)
 
-NFP_SCHEDULE_UTC: List[datetime.datetime] = [
-    datetime.datetime(2026, 10, 2, 12, 29, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 11, 6, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 4, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    # Add next month's date here, 1s EARLY. DST-adjust by hand: 8:30 AM ET
-    # = 12:30:00 UTC during DST (roughly Mar-Nov), 13:30:00 UTC otherwise
-    # -> store as 12:29:59 / 13:29:59 respectively.
-]
-
-CPI_SCHEDULE_UTC: List[datetime.datetime] = [
-    # ^ CORRECTED 2026-09-12 — was stored as 16:49:57, a stale/corrupted
-    # literal inconsistent with its own prior comment. Confirmed via BLS:
-    # real CPI release is Sept 11 2026, 8:30 AM ET = 12:30:00 UTC (DST),
-    # so 1s-early is 12:29:59. If this time has already passed by the
-    # time this file is deployed, it's a no-op (window will simply never
-    # open) and can be dropped on the next cleanup.
-    datetime.datetime(2026, 10, 14, 12, 29, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 11, 10, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 10, 13, 29, 58, tzinfo=datetime.timezone.utc),
-    # Same 8:30 AM ET / DST rule as NFP, stored 1s EARLY. Check
-    # bls.gov/schedule/news_release/cpi.htm
-]
-
-FOMC_SCHEDULE_UTC: List[datetime.datetime] = [
-    # NOTE: a "#test" entry (2026-09-14 17:39:59 UTC) was removed here
-    # 2026-09-14 — it had been added directly to this live list and fired
-    # for real on the live account. See the module-level warning above.
-    datetime.datetime(2026, 10, 28, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2026, 12, 9, 18, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 1, 27, 18, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 3, 17, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 4, 28, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 6, 9, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 7, 28, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 9, 15, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 10, 27, 17, 59, 58, tzinfo=datetime.timezone.utc),
-    datetime.datetime(2027, 12, 8, 18, 59, 58, tzinfo=datetime.timezone.utc),
-    # Decision time is 2:00 PM ET = 18:00:00 UTC during DST, 19:00:00 UTC
-    # otherwise -> stored 1s EARLY as 17:59:59 / 18:59:59 respectively.
-    # All 2027 dates confirmed against the Fed's own published (tentative)
-    # 2027 calendar as of 2026-09-11 — not extrapolated.
-]
-
-# Real release time = stored schedule time + this. Kept as a named constant
-# so every place in the file that needs to reason about the REAL moment
-# (vs. the deliberately-early stored one) references the same value.
-# Narrowed 3.0 -> 1.0 on 2026-09-12 — see CHANGE LOG for the caveat about
-# this not being backtested and the missed-window risk it reintroduces.
-EARLY_ENTRY_SECONDS = 2.0
-
-# Maximum acceptable slippage (in points) on the exits THIS FILE controls
-# directly (force-close, pre-event flatten) — TRADE_ACTION_DEAL requests
-# only. Deliberately large/effectively-uncapped: deviation is a MAXIMUM
-# tolerance, not a target, so a large value costs nothing on calm exits
-# and only matters on volatile ones — which is exactly when a guaranteed
-# exit matters most. Does NOT apply to entries (pending stop orders carry
-# no deviation field in MT5) or to SL fills (MT5 does not support
-# deviation on a triggered stop-loss).
-EXIT_DEVIATION = 500
-
-# ---------------------------------------------------------------------------
-# Per-event-type risk sizing — added 2026-09-12. See module docstring
-# CHANGE LOG for the backtest that informed this split. Flat 14% chosen
-# as an explicit final decision, not the risk-adjusted optimum tested.
-# ---------------------------------------------------------------------------
-RISK_PCT_BY_EVENT: Dict[str, float] = {
-    "NFP": 14.0,
-    "CPI": 14.0,
-    "FOMC": 14.0,
-}
-
-# How long, in seconds, check_global_flatten() keeps retrying past the
-# T+60s deadline if an earlier attempt gets rejected — kept short and
-# purely a safety net, NOT a separate window. As of 2026-09-12 the
-# target is ONE deadline (real_release + max_hold_seconds): everything
-# should close right there. This constant only exists so a rejected
-# order_send during real volatility gets a few more chances on the same
-# tight 1-second cadence rather than silently giving up, not to create
-# a second, later closing moment.
+FLATTEN_OTHER_BOTS = False     # True = old behaviour (closes OTHER bots' trades) — not recommended
+PRE_FLATTEN_MINUTES = 10       # only used when FLATTEN_OTHER_BOTS is True
 GLOBAL_FLATTEN_RETRY_SECONDS = 15.0
 
-# Comment strings for TRADE_ACTION_DEAL/TRADE_ACTION_PENDING requests.
-# MT5 rejects order_send() outright — order_send() returns a result with
-# last_error() = (-2, 'Invalid "comment" argument') — once the comment
-# gets too long; reliably safe under ~26-28 chars, ~31 sits right at the
-# edge and was observed failing live on 2026-09-14. Kept as named
-# constants, all comfortably under that edge, so no future edit
-# accidentally drifts one back over the limit.
+# MT5 rejects long comments (31 chars failed live, 2026-09-14) — keep these short
 COMMENT_ENTRY = "spike_entry"
-COMMENT_PRE_FLATTEN = "spike_pre_flatten"
-COMMENT_GLOBAL_FLATTEN = "spike_global_flatten"
-COMMENT_FORCE_CLOSE = "spike_force_close"
+COMMENT_CLOSE = "spike_close"
+COMMENT_FLATTEN = "spike_global_flatten"
+
+# Release DATES (New York). Source: BLS release calendar (2026 + 2027 published,
+# checked 2026-11-12) and the Federal Reserve FOMC calendar (2027 tentative).
+EVENT_NY_TIME = {"NFP": (8, 30), "CPI": (8, 30), "FOMC": (14, 0)}
+EVENT_DATES: Dict[str, List[str]] = {
+    "NFP": ["2026-12-04",
+            "2027-01-08", "2027-02-05", "2027-03-05", "2027-04-02", "2027-05-07", "2027-06-04",
+            "2027-07-02", "2027-08-06", "2027-09-03", "2027-10-08", "2027-11-05", "2027-12-03"],
+    "CPI": ["2026-12-10",
+            "2027-01-13", "2027-02-11", "2027-03-10", "2027-04-13", "2027-05-12", "2027-06-10",
+            "2027-07-14", "2027-08-11", "2027-09-14", "2027-10-14", "2027-11-10", "2027-12-10"],
+    "FOMC": ["2026-12-09",
+             "2027-01-27", "2027-03-17", "2027-04-28", "2027-06-09",
+             "2027-07-28", "2027-09-15", "2027-10-27", "2027-12-08"],
+}
+DATES_WARN_DAYS = 40
+
+
+def _ts(seconds: float) -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(seconds, tz=datetime.timezone.utc)
+
+
+def _round(price: float) -> float:
+    return round(price, DECIMALS)
 
 
 # ---------------------------------------------------------------------------
-# Server clock sync — this file must always reason in REAL UTC, never in
-# whatever the local machine's clock happens to say. Confirmed live on
-# 2026-09-14: the VPS clock was running ~64s BEHIND the real Exness server
-# clock. Every internal deadline/expiration in this file is computed from
-# fixed schedule literals (correct in absolute terms), but decisions about
-# WHEN to act on them ("is now inside the window", "has the deadline
-# passed") were being made against the local clock — 64s of unnoticed skew
-# is enough to place an order late enough that its own already-correct
-# expiration has passed by the time it reaches the broker, producing
-# retcode 10022 'Invalid expiration' exactly as observed that night.
-#
-# Fix: never trust datetime.datetime.now(timezone.utc) directly anywhere
-# below. Instead, periodically measure local-vs-server skew off a live
-# tick (the broker's own clock, via tick.time) and apply that correction
-# to get real UTC every time "now" is needed. This does NOT fix the VPS
-# clock itself — that still needs a proper NTP/Windows time resync — it
-# makes this strategy correct regardless of whether that happens.
+# New York time without zoneinfo (US rule since 2007)
 # ---------------------------------------------------------------------------
-_CLOCK_SKEW_REFRESH_SECONDS = 60.0  # re-measure skew at most this often
-_CLOCK_SKEW_WARN_THRESHOLD_SECONDS = 5.0  # log if drift exceeds this
-_clock_skew_cache: Dict[str, Any] = {"skew": datetime.timedelta(0), "checked_at": None}
+def _nth_sunday(year: int, month: int, n: int) -> datetime.date:
+    d = datetime.date(year, month, 1)
+    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
+    return d + datetime.timedelta(weeks=n - 1)
 
 
-def _measure_clock_skew(symbol: str = "XAUUSDm") -> datetime.timedelta:
-    """Returns server_time - local_time, using `symbol`'s last tick as the
-    real-clock reference (the broker's own clock, not ours). Positive
-    means the server clock is AHEAD of local (i.e. local is behind, the
-    exact situation observed on 2026-09-14). Cached for
-    _CLOCK_SKEW_REFRESH_SECONDS so this isn't re-measured on every single
-    poll cycle — cheap, but no need to hit it every 1s."""
-    now_local = datetime.datetime.now(datetime.timezone.utc)
-    last_checked = _clock_skew_cache["checked_at"]
-    if (
-        last_checked is not None
-        and (now_local - last_checked).total_seconds() < _CLOCK_SKEW_REFRESH_SECONDS
-    ):
-        return _clock_skew_cache["skew"]
+def ny_to_utc(day: datetime.date, hour: int, minute: int = 0) -> datetime.datetime:
+    """New York wall-clock -> UTC. DST 2nd Sunday of March 02:00 to 1st Sunday
+    of November 02:00 (UTC-4), else UTC-5."""
+    local = datetime.datetime(day.year, day.month, day.day, hour, minute)
+    start = datetime.datetime.combine(_nth_sunday(day.year, 3, 2), datetime.time(2))
+    end = datetime.datetime.combine(_nth_sunday(day.year, 11, 1), datetime.time(2))
+    offset = 4 if start <= local < end else 5
+    return (local + datetime.timedelta(hours=offset)).replace(tzinfo=datetime.timezone.utc)
 
-    tick = mt5.symbol_info_tick(symbol)
-    if tick is None:
-        # Can't measure right now (e.g. market closed, symbol not
-        # selected) — keep the last known skew rather than silently
-        # resetting to zero. Zero would mean trusting the local clock,
-        # which is exactly what we already know can be wrong.
-        return _clock_skew_cache["skew"]
 
-    server_time = datetime.datetime.fromtimestamp(tick.time, tz=datetime.timezone.utc)
-    skew = server_time - now_local
-    if abs(skew.total_seconds()) > _CLOCK_SKEW_WARN_THRESHOLD_SECONDS:
-        print(
-            f"  WARNING: local clock is {skew.total_seconds():+.1f}s off the "
-            f"Exness server clock (measured via {symbol} tick) — correcting "
-            f"internally, but the VPS clock should still be resynced "
-            f"(NTP / Windows time sync) — this workaround should not be "
-            f"treated as a permanent fix."
-        )
-    _clock_skew_cache["skew"] = skew
-    _clock_skew_cache["checked_at"] = now_local
-    return skew
+def releases() -> List[Tuple[datetime.datetime, str]]:
+    """[(real release time UTC, event type)], sorted."""
+    out = []
+    for kind, dates in EVENT_DATES.items():
+        h, m = EVENT_NY_TIME[kind]
+        for d in dates:
+            out.append((ny_to_utc(datetime.date.fromisoformat(d), h, m), kind))
+    return sorted(out)
+
+
+RELEASES = releases()
+
+
+def entry_window(now: datetime.datetime) -> Optional[Tuple[datetime.datetime, str]]:
+    """(release, kind) if now is in [release - EARLY_ENTRY_SECONDS, release)."""
+    for rel, kind in RELEASES:
+        if rel - datetime.timedelta(seconds=EARLY_ENTRY_SECONDS) <= now < rel:
+            return rel, kind
+    return None
+
+
+def live_span(now: datetime.datetime) -> Optional[Tuple[datetime.datetime, str]]:
+    """(release, kind) if now is in [release - EARLY_ENTRY_SECONDS, release +
+    HOLD_SECONDS) — the only time this strategy may hold anything."""
+    for rel, kind in RELEASES:
+        if rel - datetime.timedelta(seconds=EARLY_ENTRY_SECONDS) <= now < rel + datetime.timedelta(seconds=HOLD_SECONDS):
+            return rel, kind
+    return None
+
+
+def next_release(now: datetime.datetime) -> Optional[Tuple[datetime.datetime, str]]:
+    return next(((r, k) for r, k in RELEASES if r > now), None)
+
+
+# ---------------------------------------------------------------------------
+# Clock: broker-corrected UTC
+# ---------------------------------------------------------------------------
+SKEW_MIN_SECONDS = 5.0         # smaller gaps = tick age / rounding, not a clock error
+SKEW_MAX_SECONDS = 600.0       # bigger = market closed (old tick), ignore
+_skew: Dict[str, Any] = {"value": datetime.timedelta(0), "checked": None}
 
 
 def _utc_now() -> datetime.datetime:
-    """The real UTC 'now' this file reasons with, everywhere. Local
-    system time corrected by the last-measured skew against the broker's
-    own clock (see _measure_clock_skew above). Every internal
-    now-comparison and every default `now` in this class uses this
-    instead of datetime.datetime.now(datetime.timezone.utc) directly."""
-    return datetime.datetime.now(datetime.timezone.utc) + _measure_clock_skew()
-
-
-def _validate_calendar_freshness() -> None:
-    now = datetime.datetime.now(datetime.timezone.utc)
-    for name, schedule in (
-        ("NFP", NFP_SCHEDULE_UTC),
-        ("CPI", CPI_SCHEDULE_UTC),
-        ("FOMC", FOMC_SCHEDULE_UTC),
-    ):
-        future = [d for d in schedule if d >= now]
-        if not future:
-            print(
-                f"  !!! WARNING: {name}_SCHEDULE_UTC has NO upcoming dates — "
-                f"update the list in news_spike_strategy.py now."
-            )
-        else:
-            days_until_next = (min(future) - now).days
-            if days_until_next > 40:
-                print(
-                    f"  WARNING: next {name} date is {days_until_next} days away "
-                    f"({min(future)}) — double-check the list isn't stale."
-                )
-
-
-def _validate_hedging_mode() -> None:
-    """Informational only now — the flatten-before-entry mechanism
-    (_next_flatten_window / _flatten_symbol) is the operative protection
-    against cross-strategy interference, not this check. Left in place
-    as a diagnostic since it's cheap and still useful context."""
-    acc = mt5.account_info()
-    if acc is None:
-        print(
-            "  WARNING: mt5.account_info() unavailable — cannot verify " "hedging mode."
-        )
-        return
-    margin_mode = getattr(acc, "margin_mode", None)
-    HEDGING = getattr(mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2)
-    if margin_mode != HEDGING:
-        print(
-            f"  NOTE: account is NOT in hedging mode (margin_mode={margin_mode}). "
-            "Flatten-before-entry logic handles the overlap risk with "
-            "straddle_strategy.py regardless, but worth knowing."
-        )
-    else:
-        print("  Hedging mode confirmed.")
-
-
-_validate_calendar_freshness()
-_validate_hedging_mode()
-_measure_clock_skew()  # force an initial skew reading at import time so
-# any meaningful drift is visible in the log from the very first cycle,
-# not only whenever some other code path happens to call _utc_now() first.
-
-# ---------------------------------------------------------------------------
-# Per-symbol configuration
-# ---------------------------------------------------------------------------
-# offset/sl are in PRICE units (not pips) — already converted below so the
-# entry code never has to know per-symbol pip size.
-#
-# Lot sizing pulls LIVE from mt5.symbol_info(symbol).trade_tick_value/
-# trade_tick_size, clamped to the broker's real volume_min/max/step —
-# see _base_lot(). No static pip-value guess table.
-#
-# decimals controls price rounding in _round_price().
-#
-# risk_pct here is now a FALLBACK ONLY (used if an event_type isn't found
-# in RISK_PCT_BY_EVENT) — see that dict above for the actual live values
-# as of 2026-09-12 (flat 14% on all three event types).
-
-SYMBOL_CONFIG: Dict[str, Dict[str, Any]] = {
-    "XAUUSDm": {
-        "pip": 1.0,
-        "point_size": 0.001,
-        "offset": 3.0,  # $ — reverted 2026-09-11 back to the original 2024
-        # backtest value (had drifted 3.0 -> 3.5 -> 4.0 over prior widenings,
-        # see CHANGE LOG). Note: as a % of price this is smaller now than it
-        # was on the original 2024-01-02 to 2025-12-05 validation window,
-        # since gold's price level has moved since then — not re-validated
-        # at today's price level.
-        "sl": 7.0,  # $ — widened again from 6.0 (2026-09-04, ~17%). Real Sept 4
-        # tick data showed this is a price level, not an enforced payment
-        # cap — see module docstring.
-        "risk_pct": 2.0,  # FALLBACK ONLY as of 2026-09-12 — see
-        # RISK_PCT_BY_EVENT above for the actual live per-event-type
-        # values. Kept here so _base_lot() always has something sane to
-        # fall back to if event_type resolution ever fails.
-        "decimals": 2,
-        "max_hold_seconds": 60.0,
-    },
-}
-
-RISK_PCT = 2.0  # fallback default only if a symbol's config is missing risk_pct
-# AND no event-type-specific value is available either.
-# History: see module docstring CHANGE LOG for the full sequence of
-# changes to this and to RISK_PCT_BY_EVENT.
-MAGIC = 20260807  # unique to this strategy — must not collide with
-# straddle_strategy.py (20260716), news_confirm_strategy.py
-# (20260801), or news_reload_strategy.py (20260810)
-
-
-def _round_price(price: float, symbol: str) -> float:
-    decimals = SYMBOL_CONFIG.get(symbol, {}).get("decimals", 5)
-    return round(price, decimals)
+    local = datetime.datetime.now(datetime.timezone.utc)
+    last = _skew["checked"]
+    if last is None or (local - last).total_seconds() >= 60:
+        tick = mt5.symbol_info_tick(SYMBOL)
+        if tick is not None and getattr(tick, "time_msc", 0):
+            skew = _ts(tick.time_msc / 1000) - local
+            s = abs(skew.total_seconds())
+            new = skew if SKEW_MIN_SECONDS <= s < SKEW_MAX_SECONDS else datetime.timedelta(0)
+            if abs((new - _skew["value"]).total_seconds()) >= 1:
+                print(f"  WARNING: VPS clock {new.total_seconds():+.1f}s off broker — correcting "
+                      "(resync Windows time)" if new else "  VPS clock back in line with broker")
+            _skew["value"] = new
+        _skew["checked"] = local
+    return local + _skew["value"]
 
 
 # ---------------------------------------------------------------------------
 # Strategy
 # ---------------------------------------------------------------------------
-
-
 class NewsSpikeStrategy:
-    """No __init__ state beyond configuration — every method queries MT5
-    fresh. See module docstring for full design rationale."""
+    """No state between calls — everything is read from MT5 every time."""
 
-    def __init__(self, initial_balance: float = 90.0) -> None:
-        self.starting_balance = initial_balance
-        self.traded_symbols: List[str] = list(SYMBOL_CONFIG.keys())
-
-    # ---------------------------------------------------------------- balance & sizing
-
-    def _balance(self) -> float:
+    def __init__(self, fallback_balance: float = 90.0) -> None:
+        self.fallback_balance = fallback_balance
         acc = mt5.account_info()
-        return acc.balance if acc else self.starting_balance
+        mode = getattr(acc, "margin_mode", None) if acc else None
+        hedging = getattr(mt5, "ACCOUNT_MARGIN_MODE_RETAIL_HEDGING", 2)
+        if mode is not None and mode != hedging:
+            print(f"  WARNING: account is NOT in hedging mode (margin_mode={mode}) — "
+                  "this bot and the gold straddle can hold gold at the same time.")
 
-    def _base_lot(self, symbol: str, risk_pct_override: Optional[float] = None) -> float:
-        """Sizing pulled LIVE from the broker, not guessed. trade_tick_value
-        / trade_tick_size gives $-per-1.0-price-unit-move per lot, already
-        converted to account currency by MT5. Clamps to the symbol's real
-        volume_min/volume_max/volume_step.
-
-        risk_pct_override: when provided (normally by check_and_place()
-        resolving the current event_type against RISK_PCT_BY_EVENT), this
-        takes priority over the symbol's own SYMBOL_CONFIG["risk_pct"].
-        Falls back to SYMBOL_CONFIG's value, then to the module-level
-        RISK_PCT, only if no override is given — this keeps the function
-        usable standalone/interactively without requiring an event_type."""
-        cfg = SYMBOL_CONFIG[symbol]
-        info = mt5.symbol_info(symbol)
-        if info is None or not info.trade_tick_size:
-            print(f"  {symbol}: symbol_info unavailable — defaulting to 0.01 floor")
-            return 0.01
-
-        value_per_unit_per_lot = info.trade_tick_value / info.trade_tick_size
-        risk_pct = (
-            risk_pct_override
-            if risk_pct_override is not None
-            else cfg.get("risk_pct", RISK_PCT)
-        )
-        risk_dollar = self._balance() * (risk_pct / 100.0)
-        raw_lot = risk_dollar / (cfg["sl"] * value_per_unit_per_lot)
-
-        vol_min = info.volume_min or 0.01
-        vol_max = info.volume_max or raw_lot
-        vol_step = info.volume_step or 0.01
-
-        if raw_lot > vol_max:
-            print(
-                f"  {symbol}: target risk implies {raw_lot:.2f} lots, "
-                f"clamped to broker max {vol_max:.2f} — actual $ risk on this "
-                f"trade will be LESS than the {risk_pct}% target."
-            )
-
-        lot = max(vol_min, min(raw_lot, vol_max))
-        lot = round(lot / vol_step) * vol_step
-        return round(max(lot, vol_min), 2)
-
-    # ---------------------------------------------------------------- MT5 reads
-
-    def _get_tick(self, symbol: str):
-        tick = mt5.symbol_info_tick(symbol)
+    # ------------------------------------------------------------ MT5 helpers
+    def _tick(self):
+        tick = mt5.symbol_info_tick(SYMBOL)
         if tick is None:
-            mt5.symbol_select(symbol, True)
-            tick = mt5.symbol_info_tick(symbol)
+            mt5.symbol_select(SYMBOL, True)
+            tick = mt5.symbol_info_tick(SYMBOL)
         return tick
 
-    def _filling_mode(self, symbol: str) -> int:
+    def _filling(self, symbol: str = SYMBOL) -> int:
+        """filling_mode bitmask: 1 = FOK, 2 = IOC (no SYMBOL_FILLING_* names in
+        the Python package — mt5.SYMBOL_FILLING_IOC crashed live)."""
         info = mt5.symbol_info(symbol)
         if info is None:
             return mt5.ORDER_FILLING_IOC
-        mode = info.filling_mode
-        SYMBOL_FILLING_FOK = 1
-        SYMBOL_FILLING_IOC = 2
-        if mode & SYMBOL_FILLING_IOC:
+        if info.filling_mode & 2:
             return mt5.ORDER_FILLING_IOC
-        if mode & SYMBOL_FILLING_FOK:
+        if info.filling_mode & 1:
             return mt5.ORDER_FILLING_FOK
         return mt5.ORDER_FILLING_RETURN
 
-    def _safe_order_send(self, request: Dict[str, Any]):
+    def _send(self, request: Dict[str, Any], what: str):
         result = mt5.order_send(request)
         if result is None:
-            print(f"  order_send returned None — mt5.last_error(): {mt5.last_error()}")
+            print(f"  {what}: order_send returned None — {mt5.last_error()}")
             return None
+        if result.retcode != mt5.TRADE_RETCODE_DONE:
+            print(f"  {what}: rejected retcode={result.retcode} comment='{result.comment}'")
         return result
 
-    def has_open_position(self, symbol: str) -> bool:
-        """Public, magic-filtered check for the main loop to use instead
-        of a broker-wide open-trade count. Checks for ANY own open
-        position — a dual-fill can leave two open at once."""
-        return len(self._get_positions(symbol)) > 0
+    def _ok(self, result) -> bool:
+        return result is not None and result.retcode == mt5.TRADE_RETCODE_DONE
 
-    def has_own_open_trade(self, symbol: str) -> bool:
-        """Public, magic-filtered check for the main loop to use instead
-        of a broker-wide open-trades count. Checks for ANY own open
-        position — a dual-fill can leave two open at once."""
-        return len(self._get_positions(symbol)) > 0
+    def _positions(self) -> List[Any]:
+        return [p for p in (mt5.positions_get(symbol=SYMBOL) or ()) if p.magic == MAGIC]
 
-    def _get_position(self, symbol: str):
-        """Returns a SINGLE matching position (the first one found) —
-        kept for any external caller that still expects one-position
-        semantics. Internally, manage_open_trade() uses _get_positions()
-        (plural), since a dual-fill can leave TWO own positions open on
-        the same symbol at once. Do not use this method anywhere that
-        needs to guarantee every open position gets managed."""
-        positions = mt5.positions_get(symbol=symbol)
-        if not positions:
-            return None
-        own = [p for p in positions if p.magic == MAGIC]
-        return own[0] if own else None
+    def _orders(self) -> List[Any]:
+        return [o for o in (mt5.orders_get(symbol=SYMBOL) or ()) if o.magic == MAGIC]
 
-    def _get_positions(self, symbol: str) -> List[Any]:
-        """Returns ALL of this strategy's own open positions on a symbol,
-        not just the first — a dual-fill produces two simultaneous
-        positions with this strategy's MAGIC, and both must be tracked
-        and eventually force-closed independently, or one would sit open
-        indefinitely with nothing ever managing it."""
-        positions = mt5.positions_get(symbol=symbol)
-        if not positions:
-            return []
-        return [p for p in positions if p.magic == MAGIC]
+    def _lot(self) -> Tuple[float, bool]:
+        """balance * 1% / ($7 * $ per 1.0 move per lot), rounded DOWN to the
+        lot step; volume_min if smaller (flagged)."""
+        info = mt5.symbol_info(SYMBOL)
+        if info is None or not info.trade_tick_size:
+            return 0.01, True
+        per_unit = info.trade_tick_value / info.trade_tick_size
+        acc = mt5.account_info()
+        balance = acc.balance if acc else self.fallback_balance
+        raw = balance * RISK_PCT / 100.0 / (SL * per_unit)
+        vmin, vstep = info.volume_min or 0.01, info.volume_step or 0.01
+        vmax = info.volume_max or raw
+        lot = math.floor(raw / vstep + 1e-9) * vstep
+        forced = lot < vmin
+        return round(min(vmax, max(vmin, lot)), 2), forced
 
-    def _get_pending_orders(self, symbol: str) -> Dict[str, Any]:
-        orders = mt5.orders_get(symbol=symbol) or ()
-        own = [o for o in orders if o.magic == MAGIC]
-        buy = next((o for o in own if o.type == mt5.ORDER_TYPE_BUY_STOP), None)
-        sell = next((o for o in own if o.type == mt5.ORDER_TYPE_SELL_STOP), None)
-        return {"buy": buy, "sell": sell}
-
-    # ---------------------------------------------------------------- event calendar
-
-    def _next_event_trigger_window(
-        self, now: datetime.datetime
-    ) -> Optional[Tuple[datetime.datetime, str]]:
-        """HARD pre-release-only entry window. `release_time` values in
-        the schedule constants are stored EARLY_ENTRY_SECONDS before the
-        real release. This window opens at that stored time and closes
-        AT the real release moment
-        (`release_time + EARLY_ENTRY_SECONDS`) — NOT minutes after. Once
-        the real release has passed, price has already moved and there
-        is no retry: that symbol sits out this event."""
-        for event_type, schedule in (
-            ("NFP", NFP_SCHEDULE_UTC),
-            ("CPI", CPI_SCHEDULE_UTC),
-            ("FOMC", FOMC_SCHEDULE_UTC),
-        ):
-            for release_time in schedule:
-                real_release = release_time + datetime.timedelta(
-                    seconds=EARLY_ENTRY_SECONDS
-                )
-                if release_time <= now < real_release:
-                    return release_time, event_type
-        return None
-
-    def _event_already_traded(
-        self, symbol: str, release_time: datetime.datetime
-    ) -> bool:
-        """Has this SPECIFIC event already produced a completed trade
-        today? Derived from real MT5 deal history, not stored."""
-        deals = (
-            mt5.history_deals_get(release_time, _utc_now())
-            or []
-        )
-        own_closes = [
-            d
-            for d in deals
-            if d.symbol == symbol and d.magic == MAGIC and d.entry == mt5.DEAL_ENTRY_OUT
-        ]
-        return len(own_closes) > 0
-
-    def _next_flatten_window(
-        self, now: datetime.datetime, lead_minutes: float = 10.0
-    ) -> Optional[Tuple[datetime.datetime, str]]:
-        """Returns (release_time, event_type) if `now` is inside the
-        pre-event flatten window — lead_minutes before the stored
-        (early) release_time, up to release_time itself."""
-        for event_type, schedule in (
-            ("NFP", NFP_SCHEDULE_UTC),
-            ("CPI", CPI_SCHEDULE_UTC),
-            ("FOMC", FOMC_SCHEDULE_UTC),
-        ):
-            for release_time in schedule:
-                flatten_start = release_time - datetime.timedelta(minutes=lead_minutes)
-                if flatten_start <= now < release_time:
-                    return release_time, event_type
-        return None
-
-    def _flatten_symbol(self, symbol: str) -> Optional[str]:
-        """Closes ANY open position and cancels ANY pending order on this
-        symbol, regardless of magic number — deliberate design choice:
-        simpler than detecting/blocking on hedging mode. Called from two
-        places in check_and_place() — the window-based check AND an
-        unconditional final check right before order placement. Scoped
-        to a SINGLE symbol (this strategy's own, XAUUSDm) — for the
-        portfolio-WIDE flatten across every symbol/magic at the event
-        deadline, see _flatten_entire_account() below.
-
-        Returns a summary string covering BOTH successful actions and
-        failed attempts (2026-09-14 fix) — a rejected order_send here
-        (e.g. the comment-length rejection observed live on 2026-09-14)
-        must never be silently reported as "nothing to do"."""
-        actions: List[str] = []
-        failures: List[str] = []
-
-        for pos in mt5.positions_get(symbol=symbol) or ():
-            tick = self._get_tick(symbol)
-            if tick is None:
-                failures.append(f"position ticket={pos.ticket}: no tick data, skipped")
-                continue
-            is_buy = pos.type == mt5.POSITION_TYPE_BUY
-            result = self._safe_order_send(
-                {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": symbol,
-                    "volume": pos.volume,
-                    "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                    "position": pos.ticket,
-                    "price": tick.bid if is_buy else tick.ask,
-                    "deviation": EXIT_DEVIATION,
-                    "magic": MAGIC,
-                    "comment": COMMENT_PRE_FLATTEN,
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": self._filling_mode(symbol),
-                }
-            )
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                actions.append(f"closed position magic={pos.magic} ticket={pos.ticket}")
-            else:
-                failures.append(
-                    f"FAILED to close position ticket={pos.ticket} — "
-                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
-                )
-
-        for order in mt5.orders_get(symbol=symbol) or ():
-            result = self._safe_order_send(
-                {"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket}
-            )
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                actions.append(
-                    f"cancelled pending magic={order.magic} ticket={order.ticket}"
-                )
-            else:
-                failures.append(
-                    f"FAILED to cancel pending ticket={order.ticket} — "
-                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
-                )
-
-        if not actions and not failures:
-            return None
-        parts = list(actions)
-        if failures:
-            parts.append("!! " + "; ".join(failures))
-        return "; ".join(parts)
-
-    def _next_global_flatten_deadline(
-        self, now: datetime.datetime
-    ) -> Optional[Tuple[datetime.datetime, str]]:
-        """Single T+60s deadline (per explicit decision) — everything
-        closes right at real_release + max_hold_seconds, full stop, with
-        only a short GLOBAL_FLATTEN_RETRY_SECONDS safety margin for a
-        rejected order_send to get a couple more attempts on the same
-        1-second cadence. Returns (real_release_time, event_type) if
-        `now` is at or just past any scheduled event's real_release_time
-        + max_hold_seconds deadline. Uses XAUUSDm's max_hold_seconds as
-        the reference hold time since that's the only symbol configured
-        in this file."""
-        hold_seconds = SYMBOL_CONFIG.get("XAUUSDm", {}).get("max_hold_seconds", 60.0)
-        for event_type, schedule in (
-            ("NFP", NFP_SCHEDULE_UTC),
-            ("CPI", CPI_SCHEDULE_UTC),
-            ("FOMC", FOMC_SCHEDULE_UTC),
-        ):
-            for release_time in schedule:
-                real_release = release_time + datetime.timedelta(
-                    seconds=EARLY_ENTRY_SECONDS
-                )
-                deadline = real_release + datetime.timedelta(seconds=hold_seconds)
-                retry_end = deadline + datetime.timedelta(
-                    seconds=GLOBAL_FLATTEN_RETRY_SECONDS
-                )
-                if deadline <= now <= retry_end:
-                    return real_release, event_type
-        return None
-
-    def _flatten_entire_account(self) -> Optional[str]:
-        """Closes EVERY open position and cancels EVERY pending order
-        across the WHOLE ACCOUNT — no symbol filter, no magic filter.
-        Intentionally broader than _flatten_symbol() (which only touches
-        one symbol). See module docstring CHANGE LOG for the full
-        rationale: NFP/CPI/FOMC moves the dollar broadly, so any
-        strategy's position on any USD pair is exposed to the same
-        shared-news reversal risk gold itself is being protected from at
-        the same moment. This deliberately crosses strategy boundaries
-        (touches positions/orders opened by straddle_strategy.py,
-        MAGIC=20260716, and any other running strategy) — a narrow,
-        explicit exception to this project's usual pattern of strategies
-        never touching each other's state.
-
-        Returns a summary string covering BOTH successful actions and
-        failed attempts (2026-09-14 fix) — previously a rejected
-        order_send here (root cause: the comment string exceeded MT5's
-        length limit, last_error() = (-2, 'Invalid "comment" argument'))
-        was silently swallowed and the caller reported "already flat"
-        even though real positions/orders were still open. That is now
-        impossible: any failure is surfaced explicitly, prefixed '!!'."""
-        actions: List[str] = []
-        failures: List[str] = []
-
-        for pos in mt5.positions_get() or ():  # NO symbol filter, NO magic filter
-            tick = self._get_tick(pos.symbol)
-            if tick is None:
-                failures.append(
-                    f"{pos.symbol} position ticket={pos.ticket}: no tick data, skipped"
-                )
-                continue
-            is_buy = pos.type == mt5.POSITION_TYPE_BUY
-            result = self._safe_order_send(
-                {
-                    "action": mt5.TRADE_ACTION_DEAL,
-                    "symbol": pos.symbol,
-                    "volume": pos.volume,
-                    "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
-                    "position": pos.ticket,
-                    "price": tick.bid if is_buy else tick.ask,
-                    "deviation": EXIT_DEVIATION,
-                    "magic": pos.magic,  # preserve the ORIGINAL magic on
-                    # the closing deal, not this strategy's own — this
-                    # close is being done on behalf of whichever strategy
-                    # opened it, not re-attributed to news_spike_strategy.
-                    "comment": COMMENT_GLOBAL_FLATTEN,
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": self._filling_mode(pos.symbol),
-                }
-            )
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                actions.append(
-                    f"closed {pos.symbol} magic={pos.magic} ticket={pos.ticket}"
-                )
-            else:
-                failures.append(
-                    f"FAILED to close {pos.symbol} ticket={pos.ticket} magic={pos.magic} — "
-                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
-                )
-
-        for order in mt5.orders_get() or ():  # NO symbol filter, NO magic filter
-            result = self._safe_order_send(
-                {"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket}
-            )
-            if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-                actions.append(
-                    f"cancelled pending {order.symbol} magic={order.magic} "
-                    f"ticket={order.ticket}"
-                )
-            else:
-                failures.append(
-                    f"FAILED to cancel pending {order.symbol} ticket={order.ticket} "
-                    f"magic={order.magic} — "
-                    f"retcode={result.retcode if result else 'None (order_send None, see log)'}"
-                )
-
-        if not actions and not failures:
-            return None
-        parts = list(actions)
-        if failures:
-            parts.append("!! " + "; ".join(failures))
-        return "; ".join(parts)
-
-    def check_global_flatten(self, now: Optional[datetime.datetime] = None) -> Optional[str]:
-        """PUBLIC. Call ONCE PER POLL CYCLE from the main loop, OUTSIDE
-        the per-symbol loop (unlike manage_pending_orders()/
-        manage_open_trade()/check_and_place(), which are called once per
-        symbol). Confirmed wired into main_news_spike.py.
-
-        Returns None (does nothing) outside the narrow band right at
-        each event's real_release + max_hold_seconds deadline (plus a
-        short GLOBAL_FLATTEN_RETRY_SECONDS safety margin). Inside that
-        band, unconditionally flattens the ENTIRE account (see
-        _flatten_entire_account()) every cycle it's called — safe/
-        idempotent since closing zero remaining positions costs nothing.
-        If any close/cancel attempt fails, that failure is now surfaced
-        in the returned string (2026-09-14 fix) rather than being
-        reported as 'already flat'."""
-        if now is None:
-            now = _utc_now()
-
-        window = self._next_global_flatten_deadline(now)
-        if window is None:
-            return None
-        real_release, event_type = window
-
-        result = self._flatten_entire_account()
-        if result:
-            return f"[GLOBAL FLATTEN] Post-{event_type} ({real_release}): {result}"
-        return f"[GLOBAL FLATTEN] Post-{event_type} ({real_release}): already flat"
-
-    def check_and_place(
-        self, symbol: str, now: Optional[datetime.datetime] = None
-    ) -> Dict[str, Any]:
-        """Call on every poll (~1s cadence required near a scheduled event
-        — a narrow entry window with slower polling risks stepping over
-        it entirely, more so now at 1s early than it did at 3s). Places
-        the straddle in the narrow pre-release gap for whichever event
-        type (NFP/CPI/FOMC) currently has it open. manage_open_trade()
-        then handles the hard 1-minute force-close — there is no TP, no
-        reload, and no retry past the real release moment.
-
-        `now` should be a SINGLE timestamp captured ONCE per poll cycle by
-        the caller (the main loop) and passed to every symbol's call that
-        cycle — not fetched fresh inside this method."""
-        if symbol not in self.traded_symbols:
-            return self._no(f"{symbol} not enabled")
-
-        if now is None:
-            now = _utc_now()
-
-        flatten_window = self._next_flatten_window(now)
-        if flatten_window is not None:
-            flatten_release, flatten_event = flatten_window
-            result = self._flatten_symbol(symbol)
-            if result:
-                return self._no(
-                    f"Pre-{flatten_event} flatten ({flatten_release}): {result}"
-                )
-            return self._no(f"Pre-{flatten_event} flatten window — already flat")
-
-        if self._get_position(symbol) is not None:
-            return self._no("Position already open")
-
-        pending = self._get_pending_orders(symbol)
-        if pending["buy"] is not None or pending["sell"] is not None:
-            return self._no("Straddle already pending")
-
-        window = self._next_event_trigger_window(now)
-        if window is None:
-            return self._no("Not inside any event trigger window")
-        release_time, event_type = window
-
-        if self._event_already_traded(symbol, release_time):
-            return self._no(
-                f"This {event_type} event already produced a completed trade — "
-                "no re-entry."
-            )
-
-        # Unconditional final safety net — runs every single time
-        # check_and_place() reaches this point, regardless of whether the
-        # window-based flatten above fired earlier in a different cycle.
-        flatten_result = self._flatten_symbol(symbol)
-        if flatten_result:
-            return self._no(f"Flattened at entry-time (final check): {flatten_result}")
-
-        cfg = SYMBOL_CONFIG[symbol]
-        tick = self._get_tick(symbol)
+    def _close(self, pos, comment: str) -> bool:
+        tick = mt5.symbol_info_tick(pos.symbol)
         if tick is None:
-            return self._no("No tick data")
+            mt5.symbol_select(pos.symbol, True)
+            tick = mt5.symbol_info_tick(pos.symbol)
+        if tick is None:
+            return False
+        is_buy = pos.type == mt5.POSITION_TYPE_BUY
+        return self._ok(self._send({
+            "action": mt5.TRADE_ACTION_DEAL, "symbol": pos.symbol, "volume": pos.volume,
+            "type": mt5.ORDER_TYPE_SELL if is_buy else mt5.ORDER_TYPE_BUY,
+            "position": pos.ticket, "price": tick.bid if is_buy else tick.ask,
+            "deviation": EXIT_DEVIATION, "magic": pos.magic, "comment": comment,
+            "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(pos.symbol),
+        }, f"close {pos.symbol} ticket {pos.ticket}"))
 
-        tick_age = _utc_now() - datetime.datetime.fromtimestamp(
-            tick.time, tz=datetime.timezone.utc
-        )
-        if tick_age > datetime.timedelta(minutes=10):
-            return self._no(f"Market likely closed — last tick is {tick_age} old")
+    def _cancel(self, order) -> bool:
+        return self._ok(self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": order.ticket},
+                                   f"cancel {order.symbol} order {order.ticket}"))
 
-        anchor = (tick.bid + tick.ask) / 2.0
-        offset = cfg["offset"]
-        sl = cfg["sl"]
+    # ------------------------------------------------------------ management
+    def _correct_sl(self, pos) -> Optional[str]:
+        """Re-anchor the SL to the REAL fill (entry slippage) — idempotent."""
+        is_buy = pos.type == mt5.POSITION_TYPE_BUY
+        old = pos.sl
+        want = _round(pos.price_open - SL if is_buy else pos.price_open + SL)
+        if abs(want - old) < (10 ** -DECIMALS) / 2:
+            return None
+        ok = self._ok(self._send({
+            "action": mt5.TRADE_ACTION_SLTP, "symbol": SYMBOL, "position": pos.ticket,
+            "sl": want, "tp": pos.tp,
+        }, f"SL correct ticket {pos.ticket}"))
+        return (f"ticket {pos.ticket}: SL {old} -> {want} (fill {pos.price_open})"
+                if ok else f"ticket {pos.ticket}: SL correction FAILED — will retry")
 
-        buy_stop = _round_price(anchor + offset, symbol)
-        sell_stop = _round_price(anchor - offset, symbol)
-        buy_sl = _round_price(buy_stop - sl, symbol)
-        sell_sl = _round_price(sell_stop + sl, symbol)
+    def manage(self, now: datetime.datetime) -> List[str]:
+        """Every poll, BEFORE check_and_place. Inside [release - 2 s,
+        release + 60 s): keep SLs anchored to the real fill. Anywhere else:
+        close own positions and cancel own orders (the 60 s exit, and the
+        safety net if a poll was missed)."""
+        msgs: List[str] = []
+        span = live_span(now)
+        positions, orders = self._positions(), self._orders()
+        if span is not None:
+            for pos in positions:
+                fix = self._correct_sl(pos)
+                if fix:
+                    msgs.append(fix)
+            if positions:
+                msgs.append(f"{len(positions)} position(s) open — close at "
+                            f"{span[0] + datetime.timedelta(seconds=HOLD_SECONDS):%H:%M:%S} UTC")
+        else:
+            for o in orders:
+                msgs.append(f"cancel order {o.ticket}: {'ok' if self._cancel(o) else '!! FAILED'}")
+            for pos in positions:
+                ok = self._close(pos, COMMENT_CLOSE)
+                msgs.append(f"CLOSE ticket {pos.ticket} {pos.volume} lots, P&L ~{pos.profit:+.2f}: "
+                            f"{'ok' if ok else '!! FAILED — will retry'}")
+        if FLATTEN_OTHER_BOTS:
+            msgs.extend(self._legacy_flatten(now))
+        return msgs
 
-        # Per-event-type risk_pct — resolved here since event_type is
-        # already known at this point in the flow, then passed explicitly
-        # into _base_lot() rather than that method reading a single fixed
-        # value off SYMBOL_CONFIG. Falls back to SYMBOL_CONFIG's risk_pct
-        # if event_type somehow isn't in RISK_PCT_BY_EVENT (shouldn't
-        # happen — _next_event_trigger_window only ever returns NFP/CPI/
-        # FOMC — but fails safe rather than raising if the calendars are
-        # ever extended with a new type).
-        risk_pct = RISK_PCT_BY_EVENT.get(event_type, cfg.get("risk_pct", RISK_PCT))
-        lots = self._base_lot(symbol, risk_pct_override=risk_pct)
+    def _legacy_flatten(self, now: datetime.datetime) -> List[str]:
+        """OLD behaviour, only if FLATTEN_OTHER_BOTS is True: close every gold
+        position/order of ANY bot in the 10 min before a release, and every
+        position/order on the WHOLE account at release + 60 s (15 s retry)."""
+        msgs: List[str] = []
+        for rel, kind in RELEASES:
+            start = rel - datetime.timedelta(seconds=EARLY_ENTRY_SECONDS)
+            if start - datetime.timedelta(minutes=PRE_FLATTEN_MINUTES) <= now < start:
+                for p in mt5.positions_get(symbol=SYMBOL) or ():
+                    msgs.append(f"[pre-{kind} flatten] close {p.ticket} magic {p.magic}: "
+                                f"{'ok' if self._close(p, COMMENT_FLATTEN) else '!! FAILED'}")
+                for o in mt5.orders_get(symbol=SYMBOL) or ():
+                    msgs.append(f"[pre-{kind} flatten] cancel {o.ticket} magic {o.magic}: "
+                                f"{'ok' if self._cancel(o) else '!! FAILED'}")
+            dl = rel + datetime.timedelta(seconds=HOLD_SECONDS)
+            if dl <= now <= dl + datetime.timedelta(seconds=GLOBAL_FLATTEN_RETRY_SECONDS):
+                for p in mt5.positions_get() or ():
+                    msgs.append(f"[post-{kind} GLOBAL flatten] close {p.symbol} {p.ticket} magic {p.magic}: "
+                                f"{'ok' if self._close(p, COMMENT_FLATTEN) else '!! FAILED'}")
+                for o in mt5.orders_get() or ():
+                    msgs.append(f"[post-{kind} GLOBAL flatten] cancel {o.symbol} {o.ticket}: "
+                                f"{'ok' if self._cancel(o) else '!! FAILED'}")
+        return msgs
 
-        # Deadline is enforced entirely in OUR software now, not by the
-        # broker (see 2026-09-14 CHANGE LOG) — pending orders are placed
-        # GTC and manage_pending_orders() cancels them itself once
-        # _utc_now() passes real_release_time + max_hold_seconds. This
-        # value is still computed here for logging/consistency, but is
-        # deliberately NOT sent to MT5 as an "expiration" field anymore.
-        real_release_time = release_time + datetime.timedelta(
-            seconds=EARLY_ENTRY_SECONDS
-        )
-        hold_seconds = cfg.get("max_hold_seconds", 60.0)
-        software_deadline = real_release_time + datetime.timedelta(seconds=hold_seconds)
-        filling_mode = self._filling_mode(symbol)
+    # ------------------------------------------------------------ entry
+    def check_and_place(self, now: datetime.datetime) -> str:
+        win = entry_window(now)
+        if win is None:
+            return "Outside entry window"
+        rel, kind = win
+        head = f"[{kind} {rel:%a %d %b %H:%M:%S} UTC]"
+        if self._positions() or self._orders():
+            return f"{head} straddle already placed"
+        start = rel - datetime.timedelta(seconds=EARLY_ENTRY_SECONDS)
+        deals = mt5.history_deals_get(start - datetime.timedelta(seconds=5),
+                                      now + datetime.timedelta(minutes=1))
+        if deals is None:
+            return f"{head} deal history unavailable — skipping this event (safe side)"
+        if any(d.magic == MAGIC and d.symbol == SYMBOL for d in deals):
+            return f"{head} already traded this event — no re-entry"
+        tick = self._tick()
+        if tick is None:
+            return f"{head} no tick data"
+        if now - _ts(tick.time) > STALE_TICK:
+            return f"{head} market likely closed — last tick {now - _ts(tick.time)} old"
 
+        mid = (tick.bid + tick.ask) / 2.0
+        buy_stop, sell_stop = _round(mid + OFFSET), _round(mid - OFFSET)
+        buy_sl, sell_sl = _round(buy_stop - SL), _round(sell_stop + SL)
+        lots, forced = self._lot()
+        filling = self._filling()
         tickets: Dict[str, Optional[int]] = {"buy": None, "sell": None}
-        for side, order_type, price, stop in (
+        for side, otype, price, stop in (
             ("buy", mt5.ORDER_TYPE_BUY_STOP, buy_stop, buy_sl),
             ("sell", mt5.ORDER_TYPE_SELL_STOP, sell_stop, sell_sl),
         ):
-            result = self._safe_order_send(
-                {
-                    "action": mt5.TRADE_ACTION_PENDING,
-                    "symbol": symbol,
-                    "volume": lots,
-                    "type": order_type,
-                    "price": price,
-                    "sl": stop,
-                    "tp": 0.0,
-                    "magic": MAGIC,
-                    "comment": COMMENT_ENTRY,
-                    "type_time": mt5.ORDER_TIME_GTC,
-                    "type_filling": filling_mode,
-                }
-            )
-            if result is None:
-                continue
-            if result.retcode == mt5.TRADE_RETCODE_DONE:
-                tickets[side] = result.order
-            else:
-                print(
-                    f"  {side.upper()} {symbol} rejected — retcode={result.retcode} "
-                    f"comment='{result.comment}'"
-                )
-
+            # GTC on purpose: Exness refused a ~60 s ORDER_TIME_SPECIFIED expiry
+            # (10022, 2026-09-14). manage() cancels at release + 60 s instead.
+            res = self._send({
+                "action": mt5.TRADE_ACTION_PENDING, "symbol": SYMBOL, "volume": lots,
+                "type": otype, "price": price, "sl": stop, "tp": 0.0,
+                "magic": MAGIC, "comment": COMMENT_ENTRY,
+                "type_time": mt5.ORDER_TIME_GTC, "type_filling": filling,
+            }, f"{kind} {side.upper()} stop")
+            if self._ok(res):
+                tickets[side] = res.order
         if tickets["buy"] is None or tickets["sell"] is None:
             for t in tickets.values():
                 if t is not None:
-                    self._safe_order_send(
-                        {"action": mt5.TRADE_ACTION_REMOVE, "order": t}
-                    )
-            return self._no("Order send failed — rolled back")
+                    self._send({"action": mt5.TRADE_ACTION_REMOVE, "order": t}, "rollback")
+            return f"{head} order send failed — rolled back"
+        note = " [MIN LOT — risk above 1%]" if forced else ""
+        return (f"{head} straddle placed: buy {buy_stop} / sell {sell_stop}, {lots} lots{note}, "
+                f"SL {buy_sl}/{sell_sl}, close at "
+                f"{rel + datetime.timedelta(seconds=HOLD_SECONDS):%H:%M:%S} UTC")
 
-        return {
-            "signal": "straddle",
-            "buy_stop": buy_stop,
-            "sell_stop": sell_stop,
-            "lot_size": lots,
-            "reason": f"[{event_type}] Straddle placed | buy={buy_stop} sell={sell_stop} | "
-            f"lots={lots} | risk_pct={risk_pct}%",
-        }
-
-    # ---------------------------------------------------------------- OCO / cleanup
-
-    def manage_pending_orders(self, symbol: str) -> str:
-        """This method does NOT cancel the opposite order when one side
-        fills — see CHANGE LOG. Both sides are allowed to fire; if that
-        happens, manage_open_trade() is responsible for tracking and
-        closing BOTH resulting positions independently (see
-        _get_positions()).
-
-        As of 2026-09-14 this method no longer tries to compute or
-        enforce a per-order deadline itself — that attempt depended on
-        a pending order's setup-time field, whose exact name varies
-        across MT5 Python package builds, adding fragility for no real
-        benefit. check_global_flatten() already unconditionally cancels
-        EVERY pending order on the account (no field lookups, no event
-        matching needed) at the same real_release_time + max_hold_seconds
-        deadline this strategy uses everywhere else — that is now the
-        single source of truth for pending-order cleanup. This method is
-        just a status read."""
-        pending = self._get_pending_orders(symbol)
-        if pending["buy"] is None and pending["sell"] is None:
-            return "No pending straddle"
-        return "Pending — cleared by check_global_flatten() at the event deadline"
-
-    # ---------------------------------------------------------------- trade management
-
-    def _correct_sl_for_slippage(self, symbol: str, position) -> Optional[str]:
-        """Pending stop orders can fill at a worse price than the
-        intended trigger level during a fast news cascade (ENTRY
-        slippage — distinct from SL-fill slippage, see module docstring's
-        documented ~$40 worst-case example, which is about the SL itself
-        slipping when triggered, not this). The SL submitted at order-
-        placement time is a FIXED PRICE calculated from the INTENDED
-        trigger level, not the eventual real fill price — so if entry
-        slips, that SL is now the wrong distance from where the trade
-        actually opened. Since slippage on entry pushes price AWAY from a
-        SL that didn't move with it, this widens the realized risk
-        distance beyond what risk_pct was sized for, every time entry
-        slips against the position.
-
-        This corrects that: re-anchors the SL to position.price_open
-        (the REAL fill price) +/- cfg["sl"], the instant a position is
-        found open, so the realized risk distance is always the
-        intended $7 (or whatever cfg["sl"] is) regardless of entry
-        slippage. Does NOT touch entry price or lot size, and does NOT
-        protect against the SL's OWN fill slipping when it later
-        triggers (MT5 has no deviation/tolerance control on a triggered
-        stop-loss — see EXIT_DEVIATION's docstring note). Those are two
-        separate slippage sources; this addresses only the entry-side
-        one. Safe to call every cycle — a no-op once the SL already
-        matches the corrected value."""
-        cfg = SYMBOL_CONFIG[symbol]
-        is_buy = position.type == mt5.POSITION_TYPE_BUY
-        corrected_sl = _round_price(
-            position.price_open - cfg["sl"]
-            if is_buy
-            else position.price_open + cfg["sl"],
-            symbol,
-        )
-        tolerance = (10 ** -cfg.get("decimals", 2)) / 2
-        if abs(corrected_sl - position.sl) < tolerance:
-            return None  # already correct, nothing to do
-
-        result = self._safe_order_send(
-            {
-                "action": mt5.TRADE_ACTION_SLTP,
-                "symbol": symbol,
-                "position": position.ticket,
-                "sl": corrected_sl,
-                "tp": position.tp,
-            }
-        )
-        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-            return (
-                f"ticket={position.ticket}: SL corrected for entry slippage "
-                f"{position.sl} -> {corrected_sl} (real entry {position.price_open})"
-            )
-        return (
-            f"ticket={position.ticket}: SL correction FAILED — "
-            f"retcode={result.retcode if result else 'None'}"
-        )
-
-    def manage_open_trade(self, symbol: str) -> str:
-        """Call on every poll while a position (or positions — see below)
-        is open. Checks ALL of this strategy's own open positions on the
-        symbol and keeps each one's SL corrected for entry slippage.
-
-        Does NOT force-close positions itself. Closing is handled
-        entirely by check_global_flatten() (called once per poll cycle
-        from the main loop, outside the per-symbol loop) — it already
-        unconditionally flattens the WHOLE ACCOUNT, this strategy's own
-        XAUUSDm positions included, at real_release_time +
-        max_hold_seconds. Per explicit decision (2026-09-17), the
-        separate per-position release-anchored close that used to run
-        here was removed: it was a second, independent path to the exact
-        same deadline check_global_flatten() already enforces, and a
-        second place a timing bug could hide. Same reasoning already
-        applied to pending-order cleanup in manage_pending_orders() (see
-        its 2026-09-14 CHANGE LOG entry) — this makes closing consistent
-        with that: one deadline, one mechanism, enforced in one place."""
-        positions = self._get_positions(symbol)
-        if not positions:
-            return "No open trade"
-
-        statuses: List[str] = []
-        for pos in positions:
-            sl_fix = self._correct_sl_for_slippage(symbol, pos)
-            if sl_fix:
-                statuses.append(sl_fix)
-            statuses.append(
-                f"ticket={pos.ticket} open — closed by check_global_flatten() "
-                "at the event deadline"
-            )
-
-        return "; ".join(statuses)
-
-    # ---------------------------------------------------------------- reporting
-
-    def get_performance_summary(
-        self, symbol: Optional[str] = None, lookback_days: int = 120
-    ) -> Dict[str, Any]:
-        symbols = [symbol] if symbol else self.traded_symbols
-        now = _utc_now()
-        since = now - datetime.timedelta(days=lookback_days)
-        all_closes = []
-        for sym in symbols:
-            deals = (
-                mt5.history_deals_get(
-                    since,
-                    now,
-                    group=f"*{sym}*",
-                )
-                or ()
-            )
-            all_closes.extend(
-                d for d in deals if d.magic == MAGIC and d.entry == mt5.DEAL_ENTRY_OUT
-            )
-        if not all_closes:
-            return {"trades": 0, "status": "No trades yet"}
-        wins = sum(1 for d in all_closes if d.profit > 0)
-        return {
-            "total_trades": len(all_closes),
-            "win_rate": f"{wins/len(all_closes)*100:.1f}%",
-        }
-
-    def get_performance_by_symbol(self, lookback_days: int = 120) -> Dict[str, Any]:
-        """Per-symbol breakdown."""
-        return {
-            sym: self.get_performance_summary(sym, lookback_days)
-            for sym in self.traded_symbols
-        }
-
-    # ---------------------------------------------------------------- util
-
-    def _no(self, reason: str) -> Dict[str, Any]:
-        return {
-            "signal": None,
-            "buy_stop": None,
-            "sell_stop": None,
-            "lot_size": None,
-            "reason": reason,
-        }
+    # ------------------------------------------------------------ info
+    def dates_warning(self, now: datetime.datetime) -> Optional[str]:
+        out = []
+        for kind, dates in EVENT_DATES.items():
+            last = max(datetime.date.fromisoformat(d) for d in dates)
+            if (last - now.date()).days < DATES_WARN_DAYS:
+                out.append(kind)
+        if out:
+            return (f"WARNING: news calendar runs out soon for {', '.join(out)} — add next "
+                    "year's dates to EVENT_DATES in news_spike_strategy.py")
+        return None
 
     def __repr__(self) -> str:
-        risk_str = ", ".join(f"{k}={v}%" for k, v in RISK_PCT_BY_EVENT.items())
-        return (
-            f"NewsSpikeStrategy(symbols={self.traded_symbols}, "
-            f"events=[NFP,CPI,FOMC], risk_pct=[{risk_str}] (XAUUSDm only), "
-            f"max_hold=60s, exit_deviation={EXIT_DEVIATION} (effectively uncapped), "
-            f"filter=None, one_shot_per_event=True, "
-            f"entry_window='pre-release only, {EARLY_ENTRY_SECONDS:.0f}s before real release, no post-release retry', "
-            f"global_flatten_at_deadline=True (portfolio-wide, all symbols/magics — see CHANGE LOG), "
-            f"stateless=True, "
-            f"validated=['XAUUSDm'])"
-        )
-
-
-if __name__ == "__main__":
-    s = NewsSpikeStrategy()
-    print(s)
-    print()
-    now = datetime.datetime.now(datetime.timezone.utc)
-    for name, schedule in (
-        ("NFP", NFP_SCHEDULE_UTC),
-        ("CPI", CPI_SCHEDULE_UTC),
-        ("FOMC", FOMC_SCHEDULE_UTC),
-    ):
-        future = [d for d in schedule if d >= now]
-        print(f"{name} events scheduled: {len(schedule)} total, {len(future)} upcoming")
-        print(
-            f"  Next (stored, {EARLY_ENTRY_SECONDS:.0f}s early): {min(future) if future else 'NONE — add dates'}"
-        )
-    print()
-    print("*** XAUUSDm backed by real, control-tested 1-min data + tick-level re-validation (49 events, Jan 2025-Sep 2026) ***")
-    print(f"*** risk_pct is FLAT 14% on all event types: {RISK_PCT_BY_EVENT} — see CHANGE LOG for the backtest and drawdown behind this decision (-37.0% max drawdown on the 49-event historical sequence) ***")
-    print("*** XAGUSDm removed 2026-09-11, copper (XCUUSDm) removed 2026-09-08 — see CHANGE LOG ***")
-    print(
-        f"*** Entry window: pre-release only ({EARLY_ENTRY_SECONDS:.0f}s early -> real release), no retry after -- NARROWED to 1s on 2026-09-12, NOT independently backtested, see CHANGE LOG ***"
-    )
-    print(
-        "*** GLOBAL FLATTEN: at release+60s, EVERY position/order on the WHOLE ACCOUNT "
-        "closes/cancels, not just this strategy's own gold trades ***"
-    )
-    print("*** Still DEMO ONLY — do not run any of this on real money ***")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        nxt = next_release(now)
+        return (f"NewsSpikeStrategy: {SYMBOL} NFP/CPI/FOMC straddle ±${OFFSET}, SL ${SL}, "
+                f"placed {EARLY_ENTRY_SECONDS:g}s before release, closed at +{HOLD_SECONDS:g}s, "
+                f"risk {RISK_PCT}%, magic {MAGIC}, "
+                f"{'FLATTENS OTHER BOTS' if FLATTEN_OTHER_BOTS else 'own trades only'}"
+                + (f"\n  Next: {nxt[1]} {nxt[0]:%a %d %b %Y %H:%M:%S} UTC" if nxt else ""))
