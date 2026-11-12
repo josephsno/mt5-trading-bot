@@ -1,168 +1,129 @@
-# MT5 Straddle Strategies — README
+# MT5 Trading Bots — README
 
-Two standalone, **stateless** trading strategies. Neither keeps trade/order/result
-state in memory — every method re-derives what it needs from MT5 directly
-(`positions_get()`, `orders_get()`, `history_deals_get()`). A bot restart loses
-nothing, and neither an in-memory circuit breaker nor an in-memory streak
-counter can get permanently stuck.
+*Updated 2026-11-12. Full evidence, decisions and rejected ideas live in the project's
+**STRATEGY REGISTER — what works (keep updated)**. This file is the operating manual.*
 
----
+All bots trade Joseph's Exness MT5 account, are written in Python with direct
+MetaTrader5 calls, and are **stateless**: every decision is re-derived from MT5
+(`positions_get()`, `orders_get()`, `history_deals_get()`, candles) on every poll.
+A restart loses nothing.
 
-## 1. `straddle_strategy.py` — Session-Open Straddle
-
-**Edge:** Direction at session-open is close to a coin flip, but *when* a
-breakout is likely is predictable (AUC 0.75, 4 walk-forward folds). Rather
-than guess direction, place a buy-stop + sell-stop straddle at each symbol's
-own best entry hour and let the market pick.
-
-**Mechanics**
-| Stage | Rule |
-|---|---|
-| Entry | Buy-stop + sell-stop at each symbol's fixed trigger hour (OCO — first fill cancels the other) |
-| SL | Fixed distance: 25 pips (FX) / $20 (XAU) / $0.12 (XAG) / $600 (BTC) |
-| Exit | Breakeven at trigger, then trail from 1R — no fixed TP |
-| Max hold | Adaptive: force-close 1h before the symbol's *own next* trigger, capped so it never bridges a weekend (except BTC, which trades 7 days/week) |
-| Breaker | **Cross-pair**: pauses all new entries if 2+ symbols each show 2+ consecutive losses. Hard fallback — never pauses longer than 10h, so it can't freeze permanently. A per-pair breaker was tested and made results worse. |
-
-**Symbols & validated trigger hours (2024–2026 backtest, Exness M15, $90 start, 1% risk)**
-
-| Symbol | Hour (UTC) | Trades | Win% | Result |
-|---|---|---|---|---|
-| EURUSDm | 08:00 | 503 | 51.1% | 567 pips |
-| USDJPYm | 08:00 | 513 | 54.0% | 2,823 pips |
-| GBPUSDm | 04:00 | 504 | 51.0% | 1,173 pips (nearly doubled vs. flat-24h-cap version's 625p) |
-| XAUUSDm | 01:00 | 473 | 60.0% | $2,460.45 (best of a 22-hour sweep) |
-| BTCUSDm | 15:00 | 512 | 56.6% | $789.25 (no cross-asset confirmation, held up on train/test split + year-normalized checks) |
-
-GBPUSD deliberately does **not** use 08:00 UTC — UK data releases 06:00–07:00 UTC,
-so 04:00 sits ahead of the catalyst while 08:00 only catches the retest.
-
-**Gating flags (enabled with caveats)**
-- `GOLD_ENABLED = True` — min balance $2,000 (SL=$20 → ~22% of a $90 account at the 0.01 lot floor)
-- `BTC_ENABLED = True` — min balance $600. **Contract size unverified** — assumes 1.0 lot = 1 BTC. Check `mt5.symbol_info("BTCUSDm").trade_contract_size` on the real account.
-- `SILVER_ENABLED = True` — min balance $300. **Contract size unverified** — assumes 1.0 lot = 5,000 oz. Same check needed for XAGUSDm. **Still open as of 2026-09-08** — the news spike strategy's own Sept 4 P&L walkthrough (see below) leaned on this same assumed 5,000oz figure and it's still never been confirmed against the live account.
-
-**Recent fixes baked into this revision**
-- XAGUSDm config was missing `pip` (silently fell back to FX default 0.0001, would've placed both legs on top of price) and `cancel_hour` (KeyError crash).
-- `_get_tick()` now always calls `symbol_select()` first — root cause of a live GBPUSDm 04:00 miss: `symbol_info_tick()` returns `None` for symbols not in Market Watch, it doesn't auto-add them.
-- `_safe_order_send()` wraps every `order_send()` call — a `None` return (AutoTrading off, bad filling mode, dropped connection) used to crash on `.retcode`.
-- Floating-point rounding fix for the breakeven/trail SL comparison (was silently re-attempting the same BE move forever).
-
-**Open TODOs**
-- [ ] Verify `trade_contract_size` for BTCUSDm and XAGUSDm before trusting position sizes.
-- [ ] Re-check gold sizing math once account balance actually supports it.
+**Plan:** wait out 2026, replay the strategies on the December data, start them
+fresh on the live account in **January 2027**. **Risk rule:** 1% of the balance per
+trade (minimum lot if 1% is smaller); the dip bot and pre-FOMC use 1% per 1-ATR move.
 
 ---
 
-## 2. `news_spike_strategy.py` — Scheduled-Release Spike
+## The six strategies
 
-**Edge:** Straddle at NFP/CPI/FOMC release, but simplified exit: **no TP, no
-reload chain** — a hard 1-minute force-close, win or lose, then done for that
-event (no re-entry even if time remains).
+| # | Strategy | Main file → strategy file | Symbols | Magic | `LIVE` |
+|---|---|---|---|---|---|
+| 1 | Gold straddle 00:00 + 01:00 UTC | `main_gold_straddle.py` → `strategies/gold_straddle_strategy.py` | XAUUSDm | 20261011 / 20261012 | as set (live) |
+| 2 | Index dip buy, RSI(2) at 19:00 UTC | `main_index_dip.py` → `strategies/index_dip_strategy.py` | US30m, USTECm | 20261028 / 20261029 | True |
+| 3 | Pre-FOMC drift (runs inside the dip bot) | `main_index_dip.py` → `strategies/pre_fomc_strategy.py` | US30m, USTECm, US500m | 20261034 / 35 / 36 | True |
+| 4 | News straddle NFP / CPI / FOMC | `main_news_spike.py` → `strategies/news_spike_strategy.py` | XAUUSDm | 20260807 | False (demo) |
+| 5 | Gold "hat" long, winter only | `main_gold_hat.py` → `strategies/gold_hat_strategy.py` | XAUUSDm | 20261037 | False (demo) |
+| 6 | USDJPY Asian-range break | `main_usdjpy_asian_range.py` → `strategies/usdjpy_asian_range_strategy.py` | USDJPYm | 20261038 | False (demo) |
 
-**Mechanics**
-| Stage | Rule |
-|---|---|
-| Entry | Buy-stop + sell-stop, placed **only** in a 5-second pre-release window (stored schedule times are 5s early; window opens at the stored time and closes hard at the real release — no post-release retry) |
-| SL | Real per-symbol stop, can trigger before the 1-min mark. **Confirmed 2026-09-08 on real Sept 4 tick data: this is a price level, not an enforced payment cap** — a fast post-release cascade can jump straight through it (measured ~$40 worst-case range on gold in the 300ms after one real trigger, against a nominal $7 SL). See Sizing below for how this is currently managed. |
-| Exit | Hard 60s force-close, whichever comes first (SL or timer). Exit deviation is effectively uncapped (`EXIT_DEVIATION = 500`, was 10) as of 2026-09-08 — see "Deviation fix" below. |
-| Sizing | **Flat 7% per symbol** (changed 2026-09-08, was differentiated 14.04%/14.04%/5.26%), computed live from `trade_tick_value`/`trade_tick_size`, clamped to broker min/max/step |
-| Flatten | Any position/pending order on the symbol (any magic) is flattened 10 minutes before release — handles the fact that shared symbols also carry `straddle_strategy.py`'s (different-magic) positions |
+Run **five processes** (one per main file; #2 and #3 share one). Every file has
+its path on line 1. Stop an old copy of a bot before starting the new one.
 
-**Symbols — copper removed 2026-09-08**
+### 1. Gold straddle — `strategies/gold_straddle_strategy.py`
+- 00:00 and 01:00 UTC (Tokyo open, Shanghai Gold Exchange open): buy-stop / sell-stop at mid ± $10, OCO.
+- SL $20; breakeven at +$20 (current price at the poll), then trail $15 behind the best M15 high/low.
+- Unfilled stops expire 8 h later; close 1 h before the next trigger, Friday 20:00 UTC at the latest. 5-minute polls.
+- **From 1 Jan 2027 (`FILTERS_FROM`), two daily checks:**
+  - *Movement filter:* skip the day if the median 00:00–08:00 UTC range of the last 20 weekdays is below $14 (H1 bars).
+  - *Week pause B:* weeks of the month 1–7 / 8–14 / 15–21 / 22–28 / 29–31; a week that lost in its last 2 traded months (both setups together, scored per 0.01 lot) is skipped for the next calendar month.
+- Backtest (2018 + 2022–Oct 2026, ticks): +$2,307 per 0.01 lot, max DD $472 with both checks (vs +$2,010 / $598 without).
 
-Only **XAUUSDm** and **XAGUSDm** are traded now. XCUUSDm (copper) was removed
-after reviewing Sept 4 2026 NFP on real tick data alongside gold/silver:
-copper's confirmed contract spec (contract_size=1.0, tick_value=0.01,
-tick_size=0.01 → only $1 of P&L per $1 price move per 1.0 lot) is drastically
-lower leverage than gold/silver, which forced the sizing formula toward an
-unusually large lot count (~0.67 lots at 7% risk) just to hit the same
-target risk in dollars — combined with copper's `volume_min/max/step` still
-being unconfirmed against the broker (flagged since 2026-08-30, never
-resolved), this was the least-trusted of the three symbols and was dropped
-rather than carried further unvalidated.
+### 2. Index dip buy — `strategies/index_dip_strategy.py`
+- 19:01–19:30 UTC, Mon–Fri: RSI(2) of the 19:00 closes < 5 → BUY. Exit 19:00 the next trading day.
+- Stop: US30 1.31 × ATR14, USTEC 3 × ATR14. Size: 1% per 1-ATR move. 3-day pause after a losing trade; no monthly breaker.
+- History is primed 18:50–18:59 and must read the same twice; a price cross-check rejects half-synced data (29 Oct 2026 bug).
 
-**Validation status**
+### 3. Pre-FOMC drift — `strategies/pre_fomc_strategy.py`
+- BUY 14:00 New York the day before each scheduled Fed decision; close 13:59 NY on decision day.
+- Size 1% per 1-ATR move; disaster stop 3 × ATR (never hit in 43 meetings).
+- Dates in `FOMC_DATES` (9 Dec 2026 → 26 Jan 2028); the bot warns when they run out.
 
-| Symbol | Status |
-|---|---|
-| **XAUUSDm** | **Validated** — 2024-01-02 to 2025-12-05, minute-level, control-tested: NFP 59.1%, CPI 54.5%, FOMC 66.7% win rate, all beat random-time controls. One real tick-level walkthrough (Sept 4 2026 NFP) also confirmed the mechanic can survive a violent, discontinuous cascade **when direction cooperates** — it does NOT establish the SL reliably caps loss when direction doesn't cooperate. Still a single event. |
-| XAGUSDm | Unvalidated — offset/SL guessed by scaling off gold. One real tick-level walkthrough exists (Sept 4 2026 NFP, clean win) but the dollar figure leaned on an **assumed 5,000oz contract size**, never confirmed against `symbol_info("XAGUSDm").trade_contract_size` — treat as directionally right, not precisely right. |
-| ~~XCUUSDm~~ | Removed 2026-09-08 (see above) |
+### 4. News straddle — `strategies/news_spike_strategy.py`
+- 2 s before NFP / CPI (08:30 NY) and FOMC (14:00 NY): buy-stop / sell-stop at mid ± $3, SL $7 (re-anchored to the real fill), no OCO.
+- Everything closed / cancelled at release + 60 s; anything of its own found outside that span is closed.
+- Risk **1%** (was 14% — why it was stopped in October).
+- **Touches only its own magic.** The old version closed every gold position of any bot before each release and the whole account after it; that is now behind `FLATTEN_OTHER_BOTS = False`.
+- Release times are computed from New York time (no hand-typed early-second literals); NFP / CPI dates from the BLS calendar through Dec 2027.
+- 1-second polling from 2 min before a release; broker-corrected clock (the old main used the raw VPS clock).
 
-As of 2026-09-04, the four FX pairs (EURUSDm, GBPUSDm, USDJPYm, USDCADm) were
-**removed entirely** — as of 2026-09-08, copper followed. Strategy now trades
-only XAUUSDm / XAGUSDm. Total risk budget: ~33.2% (7 symbols, original) →
-~14% (flat 7% × 2, current).
+### 5. Gold hat long — `strategies/gold_hat_strategy.py`
+- Only while New York is on standard time (first Sunday of Nov → second Sunday of Mar), Mon–Thu.
+- BUY 11:00 NY (16:00 UTC), SELL 02:00 NY next day (07:00 UTC). Stop 2 × ATR14 (average daily high–low).
+- Size 1% at the stop — with gold's ATR near $100 that is the minimum lot below roughly a $20,000 balance.
 
-**Why the entry window is "pre-release only, 5s early"**
-Live rejections at the exact release moment (`"Invalid price"`, retcode 10006)
-traced to two compounding effects that only exist *at/after* release:
-1. the anchor price can move between being read and the order reaching the broker during the spike, and
-2. brokers widen `trade_stops_level` dynamically the instant high-impact volatility hits.
-
-Placing the straddle as a **resting** order 5s before release sidesteps both,
-since stop-distance validation happens at placement time, not continuously.
-This requires ~1s main-loop polling — slower polling risks stepping over the
-5-second window entirely. **A narrowing to 3s was considered and explicitly
-rejected on 2026-09-08** — the slippage/liquidity-gap mechanism happens in the
-seconds *after* the real release triggers the order, not in how many seconds
-early the resting order was placed. Moving from 5s to 2-3s early doesn't
-touch that mechanism at all, it only shrinks the window's margin for the
-main loop's poll cycle to reliably land inside it. Left at 5.0.
-
-**Deviation fix (2026-09-08)**
-`_close_position_at_market()` and `_flatten_symbol()` previously used
-`deviation=10` on their market-order requests. At real event volatility
-(measured spread of 340pts on a live release bar; separately, a real ~$40
-tick-level price cascade on Sept 4), a close attempted at that tight a
-tolerance could get **rejected outright** rather than filled-with-slippage —
-`manage_open_trade()` would log "will retry next cycle," meaning the "hard
-60-second" exit could silently drift to 65s, 90s, or longer while it kept
-retrying through the worst of the move. Both methods now use a shared
-`EXIT_DEVIATION = 500` constant instead — deviation is a maximum tolerance,
-not a target, so this costs nothing on calm exits and only changes behavior
-on volatile ones, which is exactly when a guaranteed exit matters most.
-
-**Other fixes baked into this revision**
-- `has_open_position()` / `has_own_open_trade()` — magic-filtered, so the main
-  loop's routing no longer mistakes another strategy's position on a shared
-  symbol for "already open" and skips `check_and_place()` (which also skipped
-  the flatten logic).
-- Unconditional final flatten check immediately before order placement, independent of the window-based flatten timing.
-- Lot sizing pulls live tick value/size instead of a static guess table (previously off by orders of magnitude, e.g. USDJPYm computing 42 lots).
-
-**Known operational quirk — daily gold/silver break**
-XAUUSDm/XAGUSDm both pause for a daily settlement break, roughly **20:58–22:02
-UTC** (confirmed via Exness's published schedule) — **21:58–23:02 WAT** in
-Joseph's local time. The strategy's own tick-staleness check (>10 min old =
-"market likely closed") correctly detects and logs this — confirmed 2026-09-08
-against a live test run, not a bug. Worth remembering when scheduling manual
-test entries: anything landing inside this window will show stale-tick
-"market closed" messages that are expected, not a fault.
-
-**Open TODO — unresolved as of 2026-09-08**
-- [ ] **`main_news_spike.py` has `LIVE = False` hardcoded**, meaning the bot
-      always connects via `MT5_USERNAME_TRIAL`/`MT5_SERVER_TRIAL` regardless
-      of intent. During a 2026-09-08 test, the bot logged "Pre-NFP flatten
-      window — already flat" for XAUUSDm/XAGUSDm while the real MT5 terminal
-      (checked directly on Joseph's phone) showed both symbols genuinely
-      open with real losses. Leading theory: the bot's demo-account session
-      is stale/disconnected and looking at a different account entirely than
-      the one being checked manually — not a bug in `news_spike_strategy.py`
-      or `main_news_spike.py`'s logic itself, which both read back correctly
-      on review. **Not yet confirmed** — needs `mt5.account_info()` run
-      directly on the VPS against `MT5_USERNAME_TRIAL`/`MT5_SERVER_TRIAL` to
-      compare login/server against the account shown on the phone, and a
-      live tick check (`symbol_info_tick("XAUUSDm")`) to see if that session
-      is actually receiving data. Re-test planned for a time outside the
-      daily break window (see above).
-
-**Status:** demo/paper only across all symbols — do not run on real money yet.
+### 6. USDJPY Asian-range break — `strategies/usdjpy_asian_range_strategy.py`
+- Range = bid high / low 19:00–00:00 NY (M1 bars, read twice). At 00:00 NY: buy-stop at the high, sell-stop at the low, SL at the other edge, both live (stop-and-reverse).
+- If price is already through an edge at 00:00 (~5% of days), that side enters at market.
+- Close everything at 09:00 NY. Mon–Fri; thin evenings (< 120 M1 bars) skipped. Size 1% of the range per side.
+- USDJPY only — approved as a single-pair exception (the same rules lose on EURUSD / GBPUSD).
 
 ---
 
-## Shared conventions
-- Each strategy owns a unique `MAGIC` number (straddle: `20260716`, news spike: `20260807`) so they never mistake each other's positions for their own.
-- Both wrap every `mt5.order_send()` in a helper that checks for `None` before touching `.retcode`.
-- Both re-derive filling mode (`ORDER_FILLING_IOC`/`FOK`/`RETURN`) per call from `symbol_info().filling_mode` rather than hardcoding one mode.
+## Performance tracker — `performance_tracker.py`
+Read-only; never places or changes a trade.
+```
+python performance_tracker.py                 # live account, from 1 Jan 2027
+python performance_tracker.py --demo          # demo account
+python performance_tracker.py --since 2026-11-01
+```
+Writes `reports/strategy_performance_<live|demo>_<date>.xlsx`: **Summary** (trades, win %
+vs backtest win %, net $, avg win/loss, profit factor, max drawdown, best/worst, open now),
+**Monthly** (net $ per strategy per month), **Trades** (every closed trade — wins green,
+losses red), **Open**. Needs `pip install openpyxl`. Run once normally and once with
+`--demo` while some bots are still on demo.
+
+---
+
+## Shared conventions (all bots)
+- **Own magic only.** Every bot reads and touches only its own magic numbers. Trade history is
+  read per position (an SL exit is a server deal and may not carry the magic).
+- **Broker time, not the VPS clock.** The clock is corrected from the latest tick (milliseconds);
+  only real gaps (≥ 5 s, e.g. the 64 s seen on 2026-09-14) are corrected. Keep Windows time sync on.
+- **New York time without tzdata.** The US daylight-saving rule is in the code (Windows Python has
+  no time-zone database by default). Verified against zoneinfo for 2021–2028.
+- **History must be trusted.** Candle and deal reads are repeated until two reads agree; a failed or
+  half-loaded read skips the decision instead of trading on bad data.
+- **Missed-poll safety.** Every bot closes its own leftovers at the first poll after its exit time.
+- **MT5 API:** every `order_send()` is checked for `None` before `.retcode`; filling mode comes from
+  the `symbol_info().filling_mode` bitmask (the Python package has no `SYMBOL_FILLING_*` names —
+  `mt5.SYMBOL_FILLING_IOC` crashed live); comments are kept short (31 characters was rejected live);
+  pending orders use `ORDER_TIME_GTC` where a short broker-side expiry was refused (10022).
+- **Hedging mode required.** Several bots can hold gold or indices at the same time.
+- **Login:** `LIVE = True` uses `MT5_USERNAME / MT5_PASSWORD / MT5_SERVER`, `False` uses the
+  `_TRIAL` keys (`.env`, read with python-decouple). Mains never print the password.
+
+## Magic numbers in use
+| Magic | Owner |
+|---|---|
+| 20260716 | old `straddle_strategy.py` (FX / gold session straddle) — not part of the 2027 plan |
+| 20260801 / 20260810 | old news confirm / news reload — not part of the 2027 plan |
+| 20260807 | news straddle (#4) |
+| 20261003 / 20261009 / 20261010 | old gold scalp / USTEC bots |
+| 20261011 / 20261012 | gold straddle 00:00 / 01:00 (#1) |
+| 20261028 / 20261029 | dip US30 / USTEC (#2); 20261031–33 DE30 / UK100 / JP225 (off) |
+| 20261030 | USTEC reopen straddle (demo lead) |
+| 20261034 / 35 / 36 | pre-FOMC US30 / USTEC / US500 (#3) |
+| 20261037 | gold hat long (#5) |
+| 20261038 | USDJPY Asian range (#6) |
+
+## Yearly upkeep
+- **Calendars:** add next year's FOMC dates to `pre_fomc_strategy.py` (`FOMC_DATES`) and
+  `news_spike_strategy.py` (`EVENT_DATES["FOMC"]`), and next year's NFP / CPI dates from
+  bls.gov/schedule to `EVENT_DATES`. Both bots warn ahead of time.
+- **Daily gold break:** XAUUSDm pauses about 20:58–22:02 UTC; "market likely closed" messages in
+  that window are expected.
+
+## Open items
+- [ ] December 2026 data replay of all six before the January 2027 start.
+- [ ] Recheck the gold straddle's $14 threshold on Nov–Dec 2026 data.
+- [ ] Demo checks: news straddle on NFP Fri 4 Dec 2026 13:30 UTC; pre-FOMC on 8–9 Dec 2026; hat long and USDJPY range from now.
+- [ ] Contract sizes for BTCUSDm / XAGUSDm (old straddle bot) were never verified — only matters if that bot is used again.
