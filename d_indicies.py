@@ -21,12 +21,13 @@ import MetaTrader5 as mt5
 from decouple import config
 
 SYMBOLS = [
-    # US
-    "US30m", "US500m", "USTECm",
-    # Europe
-    "DE30m", "FR40m", "STOXX50m", "UK100m",
-    # Asia-Pacific
-    "JP225m", "HK50m", "AUS200m", "IN50m",
+    # # US
+    # "US30m", "US500m", "USTECm",
+    # # Europe
+    # "DE30m", "FR40m", "STOXX50m", "UK100m",
+    # # Asia-Pacific
+    # "JP225m", "HK50m", "AUS200m", "IN50m",
+    "XAUUSDm"
 ]
 TIMEFRAMES = [
     ("D1", mt5.TIMEFRAME_D1, "%Y-%m-%d"),
